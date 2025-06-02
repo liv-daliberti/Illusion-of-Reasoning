@@ -1,10 +1,10 @@
 # Chain-of-Thought-Traces
 
 **Owner:** liv-daliberti  
-**Author:** Olivia G. d’Aliberti, Manoel Horta Ribeiro  
+**Author:** Liv G. d’Aliberti, Manoel Horta Ribeiro  
 **Date:** June 2025  
 
-A project demonstrating fine-tuning of a base Qwen 2.5-1.5B-Instruct model on the OpenR1 Math 220k dataset using two methodologies—Guided Reinforcement Preference Optimization (GRPO) and Supervised Fine-Tuning (SFT). Traces of chain-of-thought reasoning are logged and saved at fixed intervals. This repository also contains inference scripts to evaluate model performance on a held-out subset of 500 Math 220k problems.
+A project demonstrating fine-tuning of a base Qwen 2.5-1.5B-Instruct model on the OpenR1 Math 220k dataset using two methodologies—Guided Reinforcement Preference Optimization (GRPO) and Supervised Fine-Tuning (SFT). Traces of chain-of-thought reasoning are logged and saved at fixed intervals. This repository also contains inference scripts to evaluate model performance on a subset of 500 Math 220k problems.
 
 ---
 
@@ -90,3 +90,63 @@ An authenticated Hugging Face token with write permissions to push to the hubs:
 
 - `od2961/Qwen2.5-1.5B-Instruct-SFT`
 - `od2961/Qwen2.5-1.5B-Instruct-GRPO`
+
+## Data
+
+We leverage the **OpenR1-Math 220k** dataset, which comprises 220,000 math problems with chain-of-thought annotations. For training and inference, we use the Hugging Face `open-r1/OpenR1-Math-220k` repository and its default configuration.
+
+- **Train Split:**  
+  Only the first 500 selected for inference, consistent across SFT and GRPO
+
+## Training
+
+All training experiments were conducted using the base model:  
+`Qwen/Qwen2.5-1.5B-Instruct (revision: main)`  
+with modifications to enable **bfloat16**, **flash_attention_2**, and appropriate gradient settings.
+
+### Model Arguments (Common)
+
+These arguments are shared between GRPO and SFT:
+
+```yaml
+model_name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+model_revision: main
+torch_dtype: bfloat16
+attn_implementation: flash_attention_2
+dataset_name: open-r1/OpenR1-Math-220k
+dataset_prompt_column: problem
+system_prompt: >
+  "You are a helpful AI Assistant that provides well-reasoned and detailed responses.
+   You first think about the reasoning process as an internal monologue and then provide
+   the user with the answer. Respond in the following format:
+   <think>\n...\n</think>\n<answer>\n...\n</answer>"
+seed: 42
+warmup_ratio: 0.05
+bf16: true
+use_vllm: true
+gradient_accumulation_steps: 4
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+Detailed training configurations are available within the yaml folder. 
+
+\section*{Citation}
+
+If you use this work or the methodology in your own research, please cite as follows:
+
+Olivia G. d’Aliberti and Manoel Horta Ribeiro, “Chain-of-Thought Traces: Fine-Tuning Qwen 2.5-1.5B with GRPO \& SFT on Math 220k,” unpublished workshop, June 2025.
+
+\begin{verbatim}
+@misc{daliberti2025cot,
+  author       = {Olivia G. d’Aliberti and Manoel Horta Ribeiro},
+  title        = {Chain-of-Thought Traces: Fine-Tuning Qwen 2.5-1.5B with GRPO \& SFT on Math 220k},
+  year         = {2025},
+  month        = jun,
+  note         = {Unpublished workshop. \url{https://github.com/liv-daliberti/Chain-of-Thought-Traces}}
+}
+\end{verbatim}
+
+\section*{License}
+
+This project is released under the MIT License. See \texttt{LICENSE} for details.
