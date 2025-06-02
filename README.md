@@ -118,10 +118,11 @@ gradient_accumulation_steps: 4
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
+```
 
 Detailed training configurations are available within the yaml folder. 
 
-\section*{Citation}
+## Citation
 
 If you use this work or the methodology in your own research, please cite as follows:
 
@@ -137,6 +138,6 @@ Liv G. d’Aliberti and Manoel Horta Ribeiro, “Chain-of-Thought Traces: Fine-T
 }
 \end{verbatim}
 
-\section*{License}
+## License
 
 This project is released under the MIT License. See \texttt{LICENSE} for details.
