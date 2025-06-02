@@ -88,9 +88,12 @@ if __name__ == "__main__":
         # 1. Read existing lines
         print("  [DEBUG] Reading file...")
         with open(input_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+            raw_lines = f.readlines()
+
+        # Filter out any blank lines
+        lines = [ln for ln in raw_lines if ln.strip()]
         total = len(lines)
-        print(f"  [DEBUG] Total records found: {total}")
+        print(f"  [DEBUG] Total non-blank records found: {total}")
 
         # 2. Parse all records
         print("  [DEBUG] Parsing JSON lines into records...")
