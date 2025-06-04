@@ -4,160 +4,215 @@ import os
 import glob
 import tempfile
 import time
-from tqdm import tqdm
-import openai
-from openai import OpenAI
+import base64
+from mimetypes import guess_type
 
-# ——— helper to ask ChatGPT (v1 API) with rate-limit handling ——————————————————
-def judge_answer(gen_output: str, ground_truth: str, max_retries=20, backoff=2) -> bool:
-    prompt = f"""
-Ground truth: {ground_truth}
+print("Loading libraries…")
+import torch
+print("Torch version:", torch.__version__)
 
-Model output:
-{gen_output}
+# AzureOpenAI is the client that can point at your AI Sandbox endpoint
+from openai import AzureOpenAI
+import requests
+from datasets import load_dataset
 
-Question: Is the model’s <answer> correct? Reply “yes” or “no” only.
+# ──────────────────────────────────────────────────────────────────────────────
+# Configuration: Use AI Sandbox chat endpoint as “DeepSeek”
+# ──────────────────────────────────────────────────────────────────────────────
+# Ensure you have set AI_SANDBOX_KEY in your environment:
+#
+#    export AI_SANDBOX_KEY=<your_sandbox_key>
+#
+sandbox_api_key     = "08ccb8f51c534ebf9170337e15f01fef"
+sandbox_endpoint    = "https://api-ai-sandbox.princeton.edu/"
+sandbox_api_version = "2025-03-01-preview"
+
+# Pick the deployed model name that behaves like DeepSeek-R1. For example:
+DEEPSEEK_MODEL = "Meta-Llama-3-1-70B-Instruct-htzs"
+
+MAX_JUDGE_TOKENS = 256  # we will truncate/pad prompts to this length
+
+# Instruct “DeepSeek” (Sandbox) to return two tokens:
+#  • FIRST  → “YES” or “NO”: final answer correct?
+#  • SECOND → “YES” or “NO”: changed approach mid-way?
+JUDGE_TEMPLATE = """\
+You are a careful math grader. The model’s reasoning may differ from yours, but that is okay.
+First, read the ground-truth solution. Then, read the model’s reasoning and final <answer>.
+Answer with exactly two tokens separated by a space:
+• FIRST TOKEN  – “YES” or “NO” → Is the model’s final answer correct?
+• SECOND TOKEN – “YES” or “NO” → Did the model change approach or strategy part-way through?
+Do NOT write anything else beyond those two tokens.
+
+Problem:
+{problem}
+
+Ground-truth solution:
+{solution}
+
+Model output (including chain-of-thought and final <answer>):
+{gen}
 """
-    retries = 0
-    while True:
-        try:
-            print("    [DEBUG] Sending API request...")
-            response = client.chat.completions.create(
-                model=CHAT_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0
-            )
-            print("    [DEBUG] Received API response.")
-            return response.choices[0].message.content.strip().lower().startswith("y")
-        except Exception as e:
-            err_str = str(e).lower()
-            if "rate limit" in err_str or "tpm" in err_str:
-                retries += 1
-                if retries > max_retries:
-                    print("    [ERROR] Max retries reached, re-raising exception.")
-                    raise
-                wait_time = backoff ** retries
-                print(f"    [WARN] Rate limit hit. Sleeping for {wait_time}s... (retry {retries}/{max_retries})")
-                time.sleep(wait_time)
-                continue
-            print(f"    [ERROR] Unexpected exception: {e}")
-            raise
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper: Send a ChatCompletion to the Sandbox, parse the “YES/NO” pair
+# ──────────────────────────────────────────────────────────────────────────────
+def judge_with_sandbox(problem: str, solution: str, gen_output: str):
+    """
+    Returns (is_correct: bool, changed_approach: bool)
+    by calling the AI Sandbox chat completion with the JUDGE_TEMPLATE.
+    """
+
+    # 1) Fill in the template
+    prompt_text = JUDGE_TEMPLATE.format(
+        problem=problem.strip(),
+        solution=solution.strip(),
+        gen=gen_output.strip()
+    )
+
+    # 2) Build the OpenAI chat payload
+    client = AzureOpenAI(
+        api_key=sandbox_api_key,
+        azure_endpoint=sandbox_endpoint,
+        api_version=sandbox_api_version
+    )
+
+    # 3) Send the chat completion request
+    response = client.chat.completions.create(
+        model=DEEPSEEK_MODEL,
+        temperature=0.0,       # deterministic
+        max_tokens=8,          # only need two tokens (“YES NO”)
+        messages=[
+            {"role": "system",  "content": "You are a careful math grader."},
+            {"role": "user",    "content": prompt_text},
+        ],
+    )
+
+    # 4) Parse out the two‐token reply
+    reply = response.choices[0].message.content.strip().upper()
+    parts = reply.split()
+    if len(parts) >= 2 and parts[0] in {"YES", "NO"} and parts[1] in {"YES", "NO"}:
+        is_correct = (parts[0] == "YES")
+        changed   = (parts[1] == "YES")
+        return is_correct, changed
+
+    # If something unexpected was returned, default to False, False:
+    return False, False
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Main: Read inference JSONL files, append “_correct” and “_changed” flags
+#        by using judge_with_sandbox() instead of a local model
+# ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="In-place judge of inference JSONL files under a chosen directory."
+        description="Judge inference JSONL files via AI Sandbox (DeepSeek-R1 style)."
     )
     parser.add_argument(
         "--input_dir",
         type=str,
         required=True,
-        help="Path to the root directory containing inference JSONL files (recursive search)."
-    )
-    parser.add_argument(
-        "--api_key",
-        type=str,
-        default=None,
-        help="OpenAI API key (if not set via OPENAI_API_KEY environment variable)."
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="gpt-4o",
-        help="Chat model name to use for judgments (default: gpt-4o)."
+        help="Root directory containing inference JSONL files (recursive)."
     )
     args = parser.parse_args()
 
-    # ——— CONFIG —————————————————————————————————————————————
-    api_key_used = args.api_key or os.getenv("OPENAI_API_KEY")
-    if not api_key_used:
-        raise ValueError("OpenAI API key must be provided via --api_key or OPENAI_API_KEY env var.")
-    client = OpenAI(api_key=api_key_used)
-    CHAT_MODEL = args.model
+    # 1) Load the Math-220k dataset for ground-truth solutions
+    print("[INFO] Loading Math dataset for ground-truth solutions…")
+    ds = load_dataset(
+        "open-r1/OpenR1-Math-220k",
+        split="train",
+        cache_dir="/n/fs/similarity/open-r1/datasets_cache",
+    )
+    solution_map = {ex["problem"]: ex["solution"] for ex in ds}
+    print(f"[INFO] Found {len(solution_map)} entries in solution_map.")
 
-    print(f"[INFO] Using model: {CHAT_MODEL}")
-    print(f"[INFO] Input directory: {args.input_dir}")
-
-    # ——— PARAMETERS ———————————————————————————————————————————
     INPUT_ROOT = args.input_dir
-    PATTERN = "**/Qwen2.5-1.5B-Instruct-SFT_step*_train.jsonl"
+    PATTERN = "**/Qwen2.5-1.5B-Instruct-*train.jsonl"
 
-    # ——— MAIN ——————————————————————————————————————————————————
     for input_path in sorted(glob.glob(os.path.join(INPUT_ROOT, PATTERN), recursive=True)):
         print(f"\n[INFO] Starting file: {input_path}")
-        # 1. Read existing lines
-        print("  [DEBUG] Reading file...")
+
+        # 2) Read existing lines (skip blank lines)
         with open(input_path, "r", encoding="utf-8") as f:
-            raw_lines = f.readlines()
+            raw_lines = [ln for ln in f if ln.strip()]
+        total = len(raw_lines)
+        print(f"  [INFO] Found {total} non-blank JSONL records.")
 
-        # Filter out any blank lines
-        lines = [ln for ln in raw_lines if ln.strip()]
-        total = len(lines)
-        print(f"  [DEBUG] Total non-blank records found: {total}")
+        # 3) Parse all records
+        records = [json.loads(line) for line in raw_lines]
 
-        # 2. Parse all records
-        print("  [DEBUG] Parsing JSON lines into records...")
-        records = [json.loads(line) for line in lines]
-
-        # 3. Build a map from (problem, gold_answer) → record
-        print("  [DEBUG] Building lookup map for existing records...")
+        # 4) Build a lookup map by (problem, gold_answer) to preserve prior flags
         existing_map = {}
         for rec in records:
             key = json.dumps(
-                {"problem": rec.get("problem"), "gold_answer": rec.get("gold_answer")},
+                {"problem": rec["problem"], "gold_answer": rec["gold_answer"]},
                 sort_keys=True
             )
             existing_map[key] = rec
-        print(f"  [DEBUG] Lookup map size: {len(existing_map)}")
 
-        # Counters for running accuracy
         judged_count = 0
         correct_count = 0
+        changed_count = 0
 
-        # 4. Update records in place
-        print("  [INFO] Beginning to judge individual records...")
+        # 5) Iterate and judge each record if not already judged
         for idx, rec in enumerate(records, start=1):
             key = json.dumps(
-                {"problem": rec.get("problem"), "gold_answer": rec.get("gold_answer")},
+                {"problem": rec["problem"], "gold_answer": rec["gold_answer"]},
                 sort_keys=True
             )
-            base_rec = existing_map.get(key, {})
-            rec.update(base_rec)
+            rec.update(existing_map.get(key, {}))
 
             rev = rec.get("step")
             if not rev:
                 print(f"    [WARN] Record {idx} missing 'step'; skipping.")
                 continue
-            judgment_key = f"{rev}_correct"
 
-            if judgment_key not in rec:
-                print(f"    [DEBUG] Judging record {idx}/{total} (step {rev})...")
-                ground = rec["gold_answer"]
-                gen = rec.get("output", "")
-                rec[judgment_key] = judge_answer(gen, ground)
-                print(f"    [DEBUG] Judgment for step {rev}: {rec[judgment_key]}")
+            corr_key   = f"{rev}_correct"
+            change_key = f"{rev}_changed"
 
-            # Now a judgment exists
+            # Only call the sandbox if we haven’t already stored these flags
+            if corr_key not in rec or change_key not in rec:
+                problem_text  = rec["problem"]
+                solution_text = solution_map.get(problem_text, "")
+                if not solution_text:
+                    print(f"    [WARN] No solution found for problem {idx}; skipping judgment.")
+                    rec[corr_key]   = False
+                    rec[change_key] = False
+                else:
+                    gen_output = rec.get("output", "")
+                    print(f"    [DEBUG] Judging record {idx}/{total} (step {rev}) via Sandbox…")
+                    is_corr, is_changed = judge_with_sandbox(
+                        problem_text, solution_text, gen_output
+                    )
+                    rec[corr_key]   = is_corr
+                    rec[change_key] = is_changed
+                    print(f"    [DEBUG] Judgment for step {rev}: correct={is_corr}, changed_approach={is_changed}")
+
             judged_count += 1
-            if rec[judgment_key]:
+            if rec[corr_key]:
                 correct_count += 1
+            if rec[change_key]:
+                changed_count += 1
 
-            # Print running accuracy every 50 examples and at the end
+            # Print progress every 50 or at the end
             if idx % 50 == 0 or idx == total:
-                accuracy = correct_count / judged_count if judged_count > 0 else 0.0
-                print(f"    [PROGRESS] Processed {idx}/{total}, "
-                      f"Accuracy so far: {correct_count}/{judged_count} ({accuracy:.2%})")
+                accuracy    = correct_count / judged_count if judged_count else 0.0
+                change_rate = changed_count / judged_count  if judged_count else 0.0
+                print(
+                    f"    [PROGRESS] Processed {idx}/{total}, "
+                    f"Accuracy: {correct_count}/{judged_count} ({accuracy:.2%}), "
+                    f"Changed Approach: {changed_count}/{judged_count} ({change_rate:.2%})"
+                )
 
-        # 5. Write updated records back to a temp file, then replace original
-        print("  [DEBUG] Writing updated records to temporary file...")
+        # 6) Write back to a temp file, then replace the original JSONL
         dirpath, filename = os.path.split(input_path)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=dirpath, delete=False) as tmpf:
             for rec in records:
                 tmpf.write(json.dumps(rec, ensure_ascii=False) + "\n")
             temp_path = tmpf.name
-        print("  [DEBUG] Replacing original file with updated file...")
-        os.replace(temp_path, input_path)
 
-        final_accuracy = correct_count / judged_count if judged_count > 0 else 0.0
+        os.replace(temp_path, input_path)
+        final_acc        = correct_count / judged_count    if judged_count else 0.0
+        final_change_rate = changed_count / judged_count   if judged_count else 0.0
         print(f"[INFO] Completed file: {input_path}")
-        print(f"[INFO] Final accuracy: {correct_count}/{judged_count} ({final_accuracy:.2%})")
+        print(f"[INFO] Final accuracy: {correct_count}/{judged_count} ({final_acc:.2%})")
+        print(f"[INFO] Final change-rate: {changed_count}/{judged_count} ({final_change_rate:.2%})")
