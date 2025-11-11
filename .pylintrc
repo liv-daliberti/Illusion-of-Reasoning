@@ -1,0 +1,28 @@
+[MASTER]
+ignore=__pycache__
+init-hook='import sys, os; sys.path.insert(0, os.path.abspath("src"))'
+ignored-modules=
+    torch,
+    transformers,
+    trl,
+    accelerate,
+    datasets,
+    peft,
+    deepspeed,
+    bitsandbytes,
+    vllm,
+    wandb,
+    numpy,
+    requests,
+    distilabel,
+    huggingface_hub
+
+[FORMAT]
+max-line-length=100
+
+[REPORTS]
+score=yes
+
+[MESSAGES CONTROL]
+# Keep errors, warnings, and fatals; skip convention/refactor noise
+disable=C,R
