@@ -1,9 +1,5 @@
 # The Illusion of Insight in Reasoning Models
 
-**Owner:** liv-daliberti  
-**Author:** Liv G. d’Aliberti, Manoel Horta Ribeiro  
-**Date:** June 2025  
-
 Do reasoning models have ''Aha!'' moments? Prior work suggests that models like DeepSeek-R1-Zero undergo sudden realizations that lead to accurate outputs. Yet it remains unclear whether such shifts in reasoning strategy actually improve performance. In this paper, we formalize intrinsic ''Aha!'' events and instrument training runs to detect them across multiple tasks. We find that reasoning shifts are rare, do not become more frequent with training, and seldom improve accuracy. However, their effect varies according to model uncertainty. Building on this finding, we show that artificially triggering shifts under high entropy improves accuracy. Overall, our results challenge the perception that reasoning models' problem-solving capabilities stem from mid-reasoning shifts, although these shifts can be exploited to improve performance.
 
 ## Quick Start
