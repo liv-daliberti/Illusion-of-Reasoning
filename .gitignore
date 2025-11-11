@@ -39,6 +39,7 @@ venv.bak/
 .conda_envs/
 .conda_pkgs/
 .local/
+/openr1/
 
 # Editor / OS cruft
 .vscode/
