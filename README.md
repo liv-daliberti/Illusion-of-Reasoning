@@ -1,8 +1,24 @@
-# Chain-of-Thought-Traces
+# Chain-of-Thought-Traces: The Illusion of Insight in Reasoning Models
 
 **Owner:** liv-daliberti  
 **Author:** Liv G. d’Aliberti, Manoel Horta Ribeiro  
 **Date:** June 2025  
+
+Do reasoning models have ``Aha!'' moments? Prior work suggests that models like DeepSeek-R1-Zero undergo sudden realizations that lead to accurate outputs. Yet it remains unclear whether such shifts in reasoning strategy actually improve performance. In this paper, we formalize intrinsic ``Aha!'' events and instrument training runs to detect them across multiple tasks. We find that reasoning shifts are rare, do not become more frequent with training, and seldom improve accuracy. However, their effect varies according to model uncertainty. Building on this finding, we show that artificially triggering shifts under high entropy improves accuracy. Overall, our results challenge the perception that reasoning models' problem-solving capabilities stem from mid-reasoning shifts, although these shifts can be exploited to improve performance.
+
+## Quick Start
+
+- **Environment:** `make conda-local && conda activate ./openr1`
+- **Install (core):** `pip install -e .`
+- **Install (dev):** `pip install -e .[dev]`
+- **Authenticate with Hugging Face:** `huggingface-cli login` or `export HF_TOKEN=<token>` so gated assets are accessible inside Slurm jobs.
+- **Train on Slurm (recommended):**
+  ```bash
+  sbatch slurm/train.slurm --model Qwen2.5-1.5B-Instruct --task grpo --config math --accelerator zero3
+  ```
+- **MaxEnt task:** Use `--task maxent` to launch `src/maxent-grpo.py`.
+- **Extra trainer flags:** Pass overrides with `--args "--run_name demo --report_to wandb"`.
+- **More knobs:** Run `sbatch slurm/train.slurm --help` to inspect dp/tp splits, port overrides, and accelerator settings.
 
 A project demonstrating fine-tuning of a base Qwen 2.5-1.5B-Instruct model on the OpenR1 Math 220k dataset using two methodologies—Guided Reinforcement Preference Optimization (GRPO) and Supervised Fine-Tuning (SFT). Traces of chain-of-thought reasoning are logged and saved at fixed intervals. This repository also contains inference scripts to evaluate model performance on a subset of 500 Math 220k problems.
 
@@ -10,13 +26,14 @@ A project demonstrating fine-tuning of a base Qwen 2.5-1.5B-Instruct model on th
 
 ## Table of Contents
 
-1. [Repository Structure](#repository-structure)  
-2. [Prerequisites](#prerequisites)  
-3. [Data](#data)  
-4. [Training](#training)  
+1. [Quick Start](#quick-start)  
+2. [Repository Structure](#repository-structure)  
+3. [Prerequisites](#prerequisites)  
+4. [Data](#data)  
+5. [Training](#training)  
    1. [Model Arguments (Common)](#model-arguments-common)  
-5. [Citation](#citation)  
-6. [License](#license)  
+6. [Citation](#citation)  
+7. [License](#license)  
 
 ---
 

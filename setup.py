@@ -91,11 +91,33 @@ class develop(_develop):
         _patch_trl_vllm_serve()
 
 
+def _locate_src_dir(repo_root: Path):
+    """
+    Return the relative path (from repo root) and absolute Path to the src directory.
+
+    Some deployments keep open_r1's source tree nested under open-r1/src,
+    while others mirror it at repo_root/src. We support both layouts.
+    """
+    candidates = [
+        ("src", repo_root / "src"),
+        ("open-r1/src", repo_root / "open-r1" / "src"),
+        ("openr1/src", repo_root / "openr1" / "src"),
+    ]
+    for rel, path in candidates:
+        if path.is_dir():
+            return rel, path
+    raise RuntimeError(
+        "Could not find a source directory. Expected one of: "
+        + ", ".join(rel for rel, _ in candidates)
+    )
+
+
 # Remove stale open_r1.egg-info directories to avoid https://github.com/pypa/pip/issues/5466
 repo_root = Path(__file__).parent
+src_rel_path, src_dir = _locate_src_dir(repo_root)
 stale_egg_infos = [
     repo_root / "open_r1.egg-info",
-    repo_root / "src" / "open_r1.egg-info",
+    src_dir / "open_r1.egg-info",
 ]
 for stale_egg_info in stale_egg_infos:
     if stale_egg_info.exists():
@@ -231,8 +253,8 @@ setup(
     keywords="llm inference-time compute reasoning",
     license="Apache-2.0",
     url="https://github.com/huggingface/open-r1",
-    package_dir={"": "src"},
-    packages=find_packages("src"),
+    package_dir={"": src_rel_path},
+    packages=find_packages(src_rel_path),
     zip_safe=False,
     cmdclass={
         "install": install,
