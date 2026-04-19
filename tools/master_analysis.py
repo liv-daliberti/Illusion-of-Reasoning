@@ -1653,16 +1653,19 @@ def _infer_temp_from_root_name(root: str) -> Optional[float]:
       - *temp005  -> 0.05
       - *temp03   -> 0.3
       - *temp07   -> 0.7
+      - *temp1    -> 1.0
 
     Falls back to None when no token is found.
     """
     low = str(root).lower()
-    if "temp005" in low or "temp05" in low:
+    if "temp005" in low or "temp05" in low or "temp0.05" in low or "temp-0.05" in low:
         return 0.05
-    if "temp03" in low or "temp3" in low:
+    if "temp03" in low or "temp3" in low or "temp0.3" in low or "temp-0.3" in low:
         return 0.3
-    if "temp07" in low or "temp7" in low:
+    if "temp07" in low or "temp7" in low or "temp0.7" in low or "temp-0.7" in low:
         return 0.7
+    if "temp1" in low or "temp-1" in low:
+        return 1.0
     return None
 
 
@@ -1711,8 +1714,14 @@ def cmd_external_models(argv: Optional[List[str]] = None) -> int:
     models = [
         ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-openrouter"),
         ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-openrouter-temp005"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-openrouter-temp03"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-openrouter-temp07"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-openrouter-temp1"),
         ("GPT\\textendash 4o", "artifacts/results/gpt4o-math-portkey"),
         ("GPT\\textendash 4o", "artifacts/results/gpt4o-math-portkey-temp005"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-math-portkey-temp03"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-math-portkey-temp07"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-math-portkey-temp1"),
     ]
 
     per_model_temp: Dict[str, Dict[float, AccuracyCounts]] = {}
@@ -1817,6 +1826,358 @@ def cmd_external_models(argv: Optional[List[str]] = None) -> int:
     lines.append("\\bottomrule")
     lines.append("\\end{tabular*}")
     lines.append("\\caption{\\textbf{External models on \\textsc{MATH\\textendash 500}.} "
+                 "Canonical shift rates and conditional accuracy by decoding temperature.}")
+    lines.append(f"\\label{{{args.label}}}")
+    lines.append("\\end{table}")
+
+    tex = "\n".join(lines) + "\n"
+    out_path = Path(args.out_tex)
+    _ensure_parent(out_path)
+    out_path.write_text(tex, encoding="utf-8")
+    print(tex)
+    print(sentence + "\n")
+
+    out_sent = Path(args.out_sentence_tex)
+    _ensure_parent(out_sent)
+    out_sent.write_text(sentence + "\n", encoding="utf-8")
+    print(f"[ok] wrote: {out_path}")
+    print(f"[ok] wrote: {out_sent}")
+    return 0
+
+
+def cmd_external_models_xword(argv: Optional[List[str]] = None) -> int:
+    """
+    Summarize shift rates and conditional accuracies for external models on Xword.
+    """
+    parser = argparse.ArgumentParser(
+        prog="master_analysis.py external-models-xword",
+        description="Compute external-model shift rates/conditional accuracy and emit a LaTeX table + sentence snippet for Xword.",
+    )
+    parser.add_argument(
+        "--split",
+        default="test",
+        help="Record-level split filter (default: test).",
+    )
+    parser.add_argument(
+        "--pass_key",
+        default="pass1",
+        help="Which pass dict to read labels/correctness from (default: pass1).",
+    )
+    parser.add_argument(
+        "--label_key",
+        default="shift_in_reasoning_v1",
+        help="Shift label field name inside the pass dict (default: shift_in_reasoning_v1).",
+    )
+    parser.add_argument(
+        "--out_tex",
+        default="latex/table_external_models_xword.tex",
+        help="Write LaTeX table to this path (default: latex/table_external_models_xword.tex).",
+    )
+    parser.add_argument(
+        "--out_sentence_tex",
+        default="latex/external_models_sentence_xword.tex",
+        help="Write the updated sentence snippet to this path (default: latex/external_models_sentence_xword.tex).",
+    )
+    parser.add_argument(
+        "--label",
+        default="tab:external-models-xword",
+        help="LaTeX label for the table (default: tab:external-models-xword).",
+    )
+    args = parser.parse_args(argv)
+
+    # Hardcoded roots discovered in this repo (Xword external API evals).
+    # We treat each root as one decoding-temperature condition.
+    models = [
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-xword-azure"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-xword-azure-temp005"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-xword-azure-temp03"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-xword-azure-temp07"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-xword-azure-temp1"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-xword-azure-multicue"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-xword-azure-multicue-temp005"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-xword-azure-multicue-temp03"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-xword-azure-multicue-temp07"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-xword-azure-multicue-temp1"),
+    ]
+
+    per_model_temp: Dict[str, Dict[float, AccuracyCounts]] = {}
+    for model_name, root_str in models:
+        root = Path(root_str)
+        if not root.exists():
+            continue
+
+        temp = _infer_temp_from_root_name(root_str)
+        # If the root doesn't encode temp, we assume it's the "high temp" condition
+        # (mirroring the convention used by gpt4o-xword-azure-multicue vs *-temp005).
+        if temp is None:
+            temp = 0.0
+
+        # Optionally warn if record-level temperature disagrees.
+        files = scan_files_step_only(str(root), split_substr=str(args.split or ""))
+        if not files:
+            continue
+        try:
+            import json  # local import
+
+            with open(files[0], "r", encoding="utf-8") as f:
+                obj = json.loads(next(f))
+            temp_val = obj.get("temperature")
+            if temp_val is not None and abs(float(temp_val) - float(temp)) > 1e-9:
+                print(
+                    f"[warn] root temp inferred as {temp} but file reports temperature={temp_val} "
+                    f"({root_str}); using {temp}",
+                )
+        except Exception:
+            pass
+
+        counts, _steps = iter_accuracy_counts(
+            root,
+            split=str(args.split or ""),
+            min_step=0,
+            max_step=10**9,
+            pass_key=str(args.pass_key),
+            label_key=str(args.label_key),
+        )
+        per_model_temp.setdefault(model_name, {}).setdefault(float(temp), AccuracyCounts())
+        bucket = per_model_temp[model_name][float(temp)]
+        bucket.n_total += counts.n_total
+        bucket.n_labeled += counts.n_labeled
+        bucket.n_shift += counts.n_shift
+        bucket.k_shift += counts.k_shift
+        bucket.n_noshift += counts.n_noshift
+        bucket.k_noshift += counts.k_noshift
+
+    def shift_pct(c: AccuracyCounts) -> float:
+        return _pct(c.n_shift, c.n_labeled)
+
+    def acc(c: AccuracyCounts, which: str) -> float:
+        if which == "shift":
+            return (100.0 * c.k_shift / c.n_shift) if c.n_shift else 0.0
+        return (100.0 * c.k_noshift / c.n_noshift) if c.n_noshift else 0.0
+
+    # Compute shift-rate ranges for the sentence.
+    def fmt_range(values: List[float]) -> str:
+        values_sorted = sorted(values)
+        if not values_sorted:
+            return "NA"
+        if len(values_sorted) == 1:
+            return f"{values_sorted[0]:.2f}\\%"
+        return f"{values_sorted[0]:.2f}--{values_sorted[-1]:.2f}\\%"
+
+    deepseek_vals = [shift_pct(c) for _, c in sorted(per_model_temp.get("DeepSeek\\textendash R1", {}).items())]
+    gpt4o_vals = [shift_pct(c) for _, c in sorted(per_model_temp.get("GPT\\textendash 4o", {}).items())]
+
+    sentence = (
+        "To test whether this pattern is specific to small GRPO-tuned models, we evaluate "
+        "DeepSeek\\textendash R1 and GPT\\textendash 4o under matched decoding conditions on "
+        f"Xword. As shown in Table~\\ref{{{args.label}}}, both models exhibit \\emph{{very low}} "
+        "canonical shift rates across temperatures "
+        f"({fmt_range(deepseek_vals)} for DeepSeek\\textendash R1 and {fmt_range(gpt4o_vals)} for "
+        "GPT\\textendash 4o), and accuracy conditioned on a shift shows no systematic benefit, suggesting "
+        "that the phenomenon generalizes across model families and training paradigms."
+    )
+
+    # Build LaTeX table (one row per model x temp).
+    lines: List[str] = []
+    lines.append("\\begin{table}[t]")
+    lines.append("\\footnotesize")
+    lines.append("\\setlength{\\tabcolsep}{4pt}")
+    lines.append("\\begin{tabular*}{\\linewidth}{@{\\extracolsep{\\fill}} l r r r @{}}")
+    lines.append("\\toprule")
+    lines.append("{\\textbf{Model}} & {\\textbf{Temp}} & {\\(\\%S\\)} & "
+                 "{\\scriptsize \\(P(\\checkmark\\mid S{=}0)\\)} & "
+                 "{\\scriptsize \\(P(\\checkmark\\mid S{=}1)\\)} \\\\")
+    lines.append("\\midrule")
+    for model_name in sorted(per_model_temp):
+        temps = sorted(per_model_temp[model_name])
+        first = True
+        for t in temps:
+            c = per_model_temp[model_name][t]
+            row_model = model_name if first else ""
+            first = False
+            lines.append(
+                f"{row_model} & {t:.2g} & {shift_pct(c):.2f} & {acc(c,'noshift')/100.0:.3f} & {acc(c,'shift')/100.0:.3f} \\\\"
+            )
+        lines.append("\\midrule")
+    lines.append("\\bottomrule")
+    lines.append("\\end{tabular*}")
+    lines.append("\\caption{\\textbf{External models on Xword.} "
+                 "Canonical shift rates and conditional accuracy by decoding temperature.}")
+    lines.append(f"\\label{{{args.label}}}")
+    lines.append("\\end{table}")
+
+    tex = "\n".join(lines) + "\n"
+    out_path = Path(args.out_tex)
+    _ensure_parent(out_path)
+    out_path.write_text(tex, encoding="utf-8")
+    print(tex)
+    print(sentence + "\n")
+
+    out_sent = Path(args.out_sentence_tex)
+    _ensure_parent(out_sent)
+    out_sent.write_text(sentence + "\n", encoding="utf-8")
+    print(f"[ok] wrote: {out_path}")
+    print(f"[ok] wrote: {out_sent}")
+    return 0
+
+
+def cmd_external_models_carpark(argv: Optional[List[str]] = None) -> int:
+    """
+    Summarize shift rates and conditional accuracies for external models on RHour.
+    """
+    parser = argparse.ArgumentParser(
+        prog="master_analysis.py external-models-carpark",
+        description="Compute external-model shift rates/conditional accuracy and emit a LaTeX table + sentence snippet for RHour.",
+    )
+    parser.add_argument(
+        "--split",
+        default="test",
+        help="Record-level split filter (default: test).",
+    )
+    parser.add_argument(
+        "--pass_key",
+        default="pass1",
+        help="Which pass dict to read labels/correctness from (default: pass1).",
+    )
+    parser.add_argument(
+        "--label_key",
+        default="shift_in_reasoning_v1",
+        help="Shift label field name inside the pass dict (default: shift_in_reasoning_v1).",
+    )
+    parser.add_argument(
+        "--out_tex",
+        default="latex/table_external_models_carpark.tex",
+        help="Write LaTeX table to this path (default: latex/table_external_models_carpark.tex).",
+    )
+    parser.add_argument(
+        "--out_sentence_tex",
+        default="latex/external_models_sentence_carpark.tex",
+        help="Write the updated sentence snippet to this path (default: latex/external_models_sentence_carpark.tex).",
+    )
+    parser.add_argument(
+        "--label",
+        default="tab:external-models-carpark",
+        help="LaTeX label for the table (default: tab:external-models-carpark).",
+    )
+    args = parser.parse_args(argv)
+
+    # Hardcoded roots discovered in this repo (RHour external API evals).
+    # We treat each root as one decoding-temperature condition.
+    models = [
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-carpark-azure-500x8"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-carpark-azure-500x8-temp005"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-carpark-azure-500x8-temp03"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-carpark-azure-500x8-temp07"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-carpark-azure-500x8-temp1"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-carpark-azure-500x8"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-carpark-azure-500x8-temp005"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-carpark-azure-500x8-temp03"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-carpark-azure-500x8-temp07"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-carpark-azure-500x8-temp1"),
+    ]
+
+    per_model_temp: Dict[str, Dict[float, AccuracyCounts]] = {}
+    for model_name, root_str in models:
+        root = Path(root_str)
+        if not root.exists():
+            continue
+
+        temp = _infer_temp_from_root_name(root_str)
+        # If the root doesn't encode temp, we assume it's the "high temp" condition
+        # (mirroring the convention used by gpt4o-carpark-azure-500x8 vs *-temp005).
+        if temp is None:
+            temp = 0.0
+
+        # Optionally warn if record-level temperature disagrees.
+        files = scan_files_step_only(str(root), split_substr=str(args.split or ""))
+        if not files:
+            continue
+        try:
+            import json  # local import
+
+            with open(files[0], "r", encoding="utf-8") as f:
+                obj = json.loads(next(f))
+            temp_val = obj.get("temperature")
+            if temp_val is not None and abs(float(temp_val) - float(temp)) > 1e-9:
+                print(
+                    f"[warn] root temp inferred as {temp} but file reports temperature={temp_val} "
+                    f"({root_str}); using {temp}",
+                )
+        except Exception:
+            pass
+
+        counts, _steps = iter_accuracy_counts(
+            root,
+            split=str(args.split or ""),
+            min_step=0,
+            max_step=10**9,
+            pass_key=str(args.pass_key),
+            label_key=str(args.label_key),
+        )
+        per_model_temp.setdefault(model_name, {}).setdefault(float(temp), AccuracyCounts())
+        bucket = per_model_temp[model_name][float(temp)]
+        bucket.n_total += counts.n_total
+        bucket.n_labeled += counts.n_labeled
+        bucket.n_shift += counts.n_shift
+        bucket.k_shift += counts.k_shift
+        bucket.n_noshift += counts.n_noshift
+        bucket.k_noshift += counts.k_noshift
+
+    def shift_pct(c: AccuracyCounts) -> float:
+        return _pct(c.n_shift, c.n_labeled)
+
+    def acc(c: AccuracyCounts, which: str) -> float:
+        if which == "shift":
+            return (100.0 * c.k_shift / c.n_shift) if c.n_shift else 0.0
+        return (100.0 * c.k_noshift / c.n_noshift) if c.n_noshift else 0.0
+
+    # Compute shift-rate ranges for the sentence.
+    def fmt_range(values: List[float]) -> str:
+        values_sorted = sorted(values)
+        if not values_sorted:
+            return "NA"
+        if len(values_sorted) == 1:
+            return f"{values_sorted[0]:.2f}\\%"
+        return f"{values_sorted[0]:.2f}--{values_sorted[-1]:.2f}\\%"
+
+    deepseek_vals = [shift_pct(c) for _, c in sorted(per_model_temp.get("DeepSeek\\textendash R1", {}).items())]
+    gpt4o_vals = [shift_pct(c) for _, c in sorted(per_model_temp.get("GPT\\textendash 4o", {}).items())]
+
+    sentence = (
+        "To test whether this pattern is specific to small GRPO-tuned models, we evaluate "
+        "DeepSeek\\textendash R1 and GPT\\textendash 4o under matched decoding conditions on "
+        f"RHour. As shown in Table~\\ref{{{args.label}}}, both models exhibit \\emph{{very low}} "
+        "canonical shift rates across temperatures "
+        f"({fmt_range(deepseek_vals)} for DeepSeek\\textendash R1 and {fmt_range(gpt4o_vals)} for "
+        "GPT\\textendash 4o), and accuracy conditioned on a shift shows no systematic benefit, suggesting "
+        "that the phenomenon generalizes across model families and training paradigms."
+    )
+
+    # Build LaTeX table (one row per model x temp).
+    lines: List[str] = []
+    lines.append("\\begin{table}[t]")
+    lines.append("\\footnotesize")
+    lines.append("\\setlength{\\tabcolsep}{4pt}")
+    lines.append("\\begin{tabular*}{\\linewidth}{@{\\extracolsep{\\fill}} l r r r @{}}")
+    lines.append("\\toprule")
+    lines.append("{\\textbf{Model}} & {\\textbf{Temp}} & {\\(\\%S\\)} & "
+                 "{\\scriptsize \\(P(\\checkmark\\mid S{=}0)\\)} & "
+                 "{\\scriptsize \\(P(\\checkmark\\mid S{=}1)\\)} \\\\")
+    lines.append("\\midrule")
+    for model_name in sorted(per_model_temp):
+        temps = sorted(per_model_temp[model_name])
+        first = True
+        for t in temps:
+            c = per_model_temp[model_name][t]
+            row_model = model_name if first else ""
+            first = False
+            lines.append(
+                f"{row_model} & {t:.2g} & {shift_pct(c):.2f} & {acc(c,'noshift')/100.0:.3f} & {acc(c,'shift')/100.0:.3f} \\\\"
+            )
+        lines.append("\\midrule")
+    lines.append("\\bottomrule")
+    lines.append("\\end{tabular*}")
+    lines.append("\\caption{\\textbf{External models on RHour.} "
                  "Canonical shift rates and conditional accuracy by decoding temperature.}")
     lines.append(f"\\label{{{args.label}}}")
     lines.append("\\end{table}")
@@ -3577,8 +3938,14 @@ def _rq3_stratum_metrics(
     }
 
 
-def _load_forced_aha_summary(root: str) -> Optional[Dict[str, Any]]:
-    path = Path(root) / "forced_aha_effect" / "forced_aha_summary.csv"
+def _forced_aha_dir(pass2_key: Optional[str] = None) -> str:
+    if pass2_key and pass2_key != "pass2":
+        return f"forced_aha_effect_{pass2_key}"
+    return "forced_aha_effect"
+
+
+def _load_forced_aha_summary(root: str, pass2_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    path = Path(root) / _forced_aha_dir(pass2_key) / "forced_aha_summary.csv"
     if not path.exists():
         return None
     with path.open("r", encoding="utf-8") as f:
@@ -3589,7 +3956,11 @@ def _load_forced_aha_summary(root: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _compute_forced_aha_summary(roots: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
+def _compute_forced_aha_summary(
+    roots: Dict[str, List[str]],
+    *,
+    pass2_key: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
     forced_summary: Dict[str, Dict[str, Any]] = {}
     for dom, dom_roots in roots.items():
         total_n = 0.0
@@ -3598,7 +3969,7 @@ def _compute_forced_aha_summary(roots: Dict[str, List[str]]) -> Dict[str, Dict[s
         wins2 = 0.0
         wins1 = 0.0
         for root in dom_roots:
-            row = _load_forced_aha_summary(root)
+            row = _load_forced_aha_summary(root, pass2_key=pass2_key)
             if not row:
                 continue
             n_units = float(row.get("n_units", 0) or 0)
@@ -3625,6 +3996,68 @@ def _compute_forced_aha_summary(roots: Dict[str, List[str]]) -> Dict[str, Dict[s
             "wins1": int(round(wins1)),
         }
     return forced_summary
+
+
+def _compute_forced_aha_summary_for_roots(
+    roots: List[str],
+    *,
+    pass2_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    total_n = 0.0
+    sum_acc1 = 0.0
+    sum_acc2 = 0.0
+    wins2 = 0.0
+    wins1 = 0.0
+    for root in roots:
+        row = _load_forced_aha_summary(root, pass2_key=pass2_key)
+        if not row:
+            continue
+        n_units = float(row.get("n_units", 0) or 0)
+        acc1 = float(row.get("acc_pass1", 0) or 0)
+        acc2 = float(row.get("acc_pass2", 0) or 0)
+        w2 = float(row.get("wins_pass2", 0) or 0)
+        w1 = float(row.get("wins_pass1", 0) or 0)
+        total_n += n_units
+        sum_acc1 += acc1 * n_units
+        sum_acc2 += acc2 * n_units
+        wins2 += w2
+        wins1 += w1
+    if total_n <= 0:
+        raise SystemExit("No forced_aha_summary rows found for external roots.")
+    acc1 = sum_acc1 / total_n
+    acc2 = sum_acc2 / total_n
+    delta_pp = (acc2 - acc1) * 100.0
+    return {
+        "N": int(round(total_n)),
+        "p1": acc1,
+        "p2": acc2,
+        "delta_pp": delta_pp,
+        "wins2": int(round(wins2)),
+        "wins1": int(round(wins1)),
+    }
+
+
+def _rq3_domain_roots() -> Dict[str, List[str]]:
+    return {
+        "Xword": [
+            "artifacts/results/GRPO-1.5B-xword-temp-0",
+            "artifacts/results/GRPO-1.5B-xword-temp-0.05",
+            "artifacts/results/GRPO-1.5B-xword-temp-0.3",
+            "artifacts/results/GRPO-1.5B-xword-temp-0.7",
+        ],
+        "Math": [
+            "artifacts/results/GRPO-1.5B-math-temp-0.0",
+            "artifacts/results/GRPO-1.5B-math-temp-0.05",
+            "artifacts/results/GRPO-1.5B-math-temp-0.3",
+            "artifacts/results/GRPO-1.5B-math-temp-0.7",
+        ],
+        "RHour": [
+            "artifacts/results/GRPO-1.5B-carpark-temp-0",
+            "artifacts/results/GRPO-1.5B-carpark-temp-0.05",
+            "artifacts/results/GRPO-1.5B-carpark-temp-0.3",
+            "artifacts/results/GRPO-1.5B-carpark-temp-0.7",
+        ],
+    }
 
 
 def cmd_rq3_section(argv: Optional[List[str]] = None) -> int:
@@ -3691,26 +4124,7 @@ def cmd_rq3_section(argv: Optional[List[str]] = None) -> int:
     max_step = int(args.max_step)
     gate_by_words = not args.no_words_gate
 
-    roots = {
-        "Xword": [
-            "artifacts/results/GRPO-1.5B-xword-temp-0",
-            "artifacts/results/GRPO-1.5B-xword-temp-0.05",
-            "artifacts/results/GRPO-1.5B-xword-temp-0.3",
-            "artifacts/results/GRPO-1.5B-xword-temp-0.7",
-        ],
-        "Math": [
-            "artifacts/results/GRPO-1.5B-math-temp-0.0",
-            "artifacts/results/GRPO-1.5B-math-temp-0.05",
-            "artifacts/results/GRPO-1.5B-math-temp-0.3",
-            "artifacts/results/GRPO-1.5B-math-temp-0.7",
-        ],
-        "RHour": [
-            "artifacts/results/GRPO-1.5B-carpark-temp-0",
-            "artifacts/results/GRPO-1.5B-carpark-temp-0.05",
-            "artifacts/results/GRPO-1.5B-carpark-temp-0.3",
-            "artifacts/results/GRPO-1.5B-carpark-temp-0.7",
-        ],
-    }
+    roots = _rq3_domain_roots()
 
     domain_data: Dict[str, RQ3DomainData] = {}
     for domain_key, domain_roots in roots.items():
@@ -4059,6 +4473,237 @@ def cmd_rq3_section(argv: Optional[List[str]] = None) -> int:
     print(f"[ok] wrote: {table_entropy_path}")
     print(f"[ok] wrote: {forced_path}")
     print(f"[ok] wrote: {out_section_path}")
+    return 0
+
+
+def cmd_forced_aha_cues(argv: Optional[List[str]] = None) -> int:
+    """
+    Emit forced-aha (pass2 vs pass1) tables for each pass-2 cue variant.
+    """
+    parser = argparse.ArgumentParser(
+        prog="master_analysis.py forced-aha-cues",
+        description="Write forced-aha tables for each pass-2 cue (pass2a/b/c/d).",
+    )
+    parser.add_argument(
+        "--pass2_keys",
+        nargs="+",
+        default=["pass2a", "pass2b", "pass2c", "pass2d"],
+        help="Pass-2 keys to summarize (default: pass2a pass2b pass2c pass2d).",
+    )
+    parser.add_argument(
+        "--out_table_tpl",
+        default="latex/table_rq3_forced_aha_{cue}.tex",
+        help="Output path template; {cue} is replaced by the pass2 key.",
+    )
+    parser.add_argument(
+        "--label_tpl",
+        default="tab:rq3-forced-aha-{cue}",
+        help="LaTeX label template; {cue} is replaced by the pass2 key.",
+    )
+    args = parser.parse_args(argv)
+
+    cue_labels = {
+        "pass2a": "A",
+        "pass2b": "B",
+        "pass2c": "C",
+        "pass2d": "D",
+    }
+    roots = _rq3_domain_roots()
+    forced_roots = {
+        "Xword": roots["Xword"],
+        "Math": roots["Math"],
+        "RHour": roots["RHour"],
+    }
+
+    def fmt_delta(value: float) -> str:
+        sign = "+" if value > 0 else ""
+        return f"{sign}{value:.2f}"
+
+    for pass2_key in args.pass2_keys:
+        forced_summary = _compute_forced_aha_summary(forced_roots, pass2_key=pass2_key)
+        cue_label = cue_labels.get(pass2_key, pass2_key)
+        label = str(args.label_tpl).format(cue=pass2_key)
+        out_path = Path(str(args.out_table_tpl).format(cue=pass2_key))
+        _ensure_parent(out_path)
+
+        lines: List[str] = []
+        lines.append("\\begin{table}[t]")
+        lines.append("  \\centering")
+        lines.append("  \\small")
+        lines.append("  \\setlength{\\tabcolsep}{4pt}")
+        lines.append("  \\renewcommand{\\arraystretch}{1.05}")
+        lines.append("  \\begin{tabular*}{\\columnwidth}{@{\\extracolsep{\\fill}} l r r r @{}}")
+        lines.append("    \\toprule")
+        lines.append("    \\textbf{Metric} & \\textbf{Xword} & \\textbf{Math} & \\textbf{RHour} \\\\")
+        lines.append("    \\midrule")
+        lines.append(
+            f"    $N$ (paired samples)      & {_fmt_int_tex(forced_summary['Xword']['N'])}  & "
+            f"{_fmt_int_tex(forced_summary['Math']['N'])}  & {_fmt_int_tex(forced_summary['RHour']['N'])} \\\\"
+        )
+        lines.append(
+            f"    $\\hat p_{{\\text{{P1}}}}$      & {forced_summary['Xword']['p1']:.4f}    & "
+            f"{forced_summary['Math']['p1']:.4f}    & {forced_summary['RHour']['p1']:.6f} \\\\"
+        )
+        lines.append(
+            f"    $\\hat p_{{\\text{{P2}}}}$      & {forced_summary['Xword']['p2']:.4f}    & "
+            f"{forced_summary['Math']['p2']:.4f}    & {forced_summary['RHour']['p2']:.6f} \\\\"
+        )
+        lines.append(
+            f"    $\\Delta$ (pp)             & ${fmt_delta(forced_summary['Xword']['delta_pp'])}$   & "
+            f"${fmt_delta(forced_summary['Math']['delta_pp'])}$   & ${fmt_delta(forced_summary['RHour']['delta_pp'])}$ \\\\"
+        )
+        lines.append(
+            f"    wins (P2 $\\uparrow$)      & {_fmt_int_tex(forced_summary['Xword']['wins2'])}   & "
+            f"{_fmt_int_tex(forced_summary['Math']['wins2'])}  & {_fmt_int_tex(forced_summary['RHour']['wins2'])} \\\\"
+        )
+        lines.append(
+            f"    wins (P1 $\\uparrow$)      & {_fmt_int_tex(forced_summary['Xword']['wins1'])}   & "
+            f"{_fmt_int_tex(forced_summary['Math']['wins1'])}  & {_fmt_int_tex(forced_summary['RHour']['wins1'])} \\\\"
+        )
+        lines.append("    \\bottomrule")
+        lines.append("  \\end{tabular*}")
+        lines.append(
+            "  \\caption{\\textbf{Forced ``Aha'' (triggered reconsideration), sample-level results "
+            "(Cue " + cue_label + ").}\n"
+            "  We compare paired outcomes between a baseline generation (Pass~1) and a second generation "
+            "with an appended reconsideration cue (Pass~2). "
+            "$\\hat p_{\\text{P1}}$ and $\\hat p_{\\text{P2}}$ denote accuracies in each pass; "
+            "$\\Delta$ (pp) is the percentage-point gain.}"
+        )
+        lines.append(f"  \\label{{{label}}}")
+        lines.append("  \\vspace{-4mm}")
+        lines.append("\\end{table}")
+        out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    return 0
+
+
+def cmd_forced_aha_external_models(argv: Optional[List[str]] = None) -> int:
+    """
+    Emit forced-aha (pass2 vs pass1) table + section text for external models.
+    """
+    parser = argparse.ArgumentParser(
+        prog="master_analysis.py forced-aha-external-models",
+        description="Write forced-aha table/section for GPT-4o vs DeepSeek-R1 (math-only).",
+    )
+    parser.add_argument(
+        "--roots_gpt4o",
+        nargs="+",
+        default=[
+            "artifacts/results/gpt4o-math-portkey",
+            "artifacts/results/gpt4o-math-portkey-temp005",
+            "artifacts/results/gpt4o-math-portkey-temp03",
+            "artifacts/results/gpt4o-math-portkey-temp07",
+            "artifacts/results/gpt4o-math-portkey-temp1",
+        ],
+        help="GPT-4o math roots (defaults to gpt4o-math-portkey* temps).",
+    )
+    parser.add_argument(
+        "--roots_deepseek",
+        nargs="+",
+        default=[
+            "artifacts/results/deepseek-r1-openrouter",
+            "artifacts/results/deepseek-r1-openrouter-temp005",
+            "artifacts/results/deepseek-r1-openrouter-temp03",
+            "artifacts/results/deepseek-r1-openrouter-temp07",
+            "artifacts/results/deepseek-r1-openrouter-temp1",
+        ],
+        help="DeepSeek-R1 math roots (defaults to deepseek-r1-openrouter* temps).",
+    )
+    parser.add_argument(
+        "--pass2_key",
+        default=None,
+        help="Optional specific second-pass key to summarize (e.g., pass2a, pass2b).",
+    )
+    parser.add_argument(
+        "--out_table_tex",
+        default="latex/table_forced_aha_external_models.tex",
+        help="Write the LaTeX table to this path.",
+    )
+    parser.add_argument(
+        "--out_section_tex",
+        default="latex/section_forced_aha_external_models.tex",
+        help="Write the LaTeX section text to this path.",
+    )
+    parser.add_argument(
+        "--label",
+        default="tab:forced-aha-external-models",
+        help="LaTeX label for the table.",
+    )
+    args = parser.parse_args(argv)
+
+    def fmt_delta(value: float) -> str:
+        sign = "+" if value > 0 else ""
+        return f"{sign}{value:.2f}"
+
+    gpt4o = _compute_forced_aha_summary_for_roots(list(args.roots_gpt4o), pass2_key=args.pass2_key)
+    deepseek = _compute_forced_aha_summary_for_roots(list(args.roots_deepseek), pass2_key=args.pass2_key)
+
+    lines: List[str] = []
+    lines.append("\\begin{table}[t]")
+    lines.append("  \\centering")
+    lines.append("  \\small")
+    lines.append("  \\setlength{\\tabcolsep}{4pt}")
+    lines.append("  \\renewcommand{\\arraystretch}{1.05}")
+    lines.append("  \\begin{tabular*}{\\columnwidth}{@{\\extracolsep{\\fill}} l r r @{}}")
+    lines.append("    \\toprule")
+    lines.append("    \\textbf{Metric} & \\textbf{GPT-4o} & \\textbf{DeepSeek-R1} \\\\")
+    lines.append("    \\midrule")
+    lines.append(
+        f"    $N$ (paired samples)      & {_fmt_int_tex(gpt4o['N'])}  & {_fmt_int_tex(deepseek['N'])} \\\\"
+    )
+    lines.append(
+        f"    $\\hat p_{{\\text{{P1}}}}$      & {gpt4o['p1']:.4f}    & {deepseek['p1']:.4f} \\\\"
+    )
+    lines.append(
+        f"    $\\hat p_{{\\text{{P2}}}}$      & {gpt4o['p2']:.4f}    & {deepseek['p2']:.4f} \\\\"
+    )
+    lines.append(
+        f"    $\\Delta$ (pp)             & ${fmt_delta(gpt4o['delta_pp'])}$   & ${fmt_delta(deepseek['delta_pp'])}$ \\\\"
+    )
+    lines.append(
+        f"    wins (P2 $\\uparrow$)      & {_fmt_int_tex(gpt4o['wins2'])}   & {_fmt_int_tex(deepseek['wins2'])} \\\\"
+    )
+    lines.append(
+        f"    wins (P1 $\\uparrow$)      & {_fmt_int_tex(gpt4o['wins1'])}   & {_fmt_int_tex(deepseek['wins1'])} \\\\"
+    )
+    lines.append("    \\bottomrule")
+    lines.append("  \\end{tabular*}")
+    lines.append(
+        "  \\caption{\\textbf{Forced ``Aha'' (triggered reconsideration), external models on \\textsc{MATH\\textendash 500}.}\n"
+        "  We compare paired outcomes between a baseline generation (Pass~1) and a second generation with an appended reconsideration cue "
+        "(Pass~2), aggregated across decoding temperatures. "
+        "$\\hat p_{\\text{P1}}$ and $\\hat p_{\\text{P2}}$ denote accuracies in each pass; "
+        "$\\Delta$ (pp) is the percentage-point gain.}"
+    )
+    lines.append(f"  \\label{{{args.label}}}")
+    lines.append("  \\vspace{-5mm}")
+    lines.append("\\end{table}")
+
+    out_table = Path(args.out_table_tex)
+    _ensure_parent(out_table)
+    out_table.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    section = (
+        "\\noindent\n"
+        "\\textbf{Can artificially triggered reasoning shifts improve performance (external models)?}\n"
+        "We repeat the forced-reconsideration intervention on external models for \\textsc{MATH\\textendash 500} across decoding "
+        "temperatures. Table~\\ref{"
+        + args.label
+        + "} reports paired results aggregated across all temperatures. "
+        f"For GPT-4o, forced reconsideration changes accuracy from {gpt4o['p1']:.3f} to {gpt4o['p2']:.3f} "
+        f"(${fmt_delta(gpt4o['delta_pp'])}$pp). "
+        f"For DeepSeek-R1, accuracy shifts from {deepseek['p1']:.3f} to {deepseek['p2']:.3f} "
+        f"(${fmt_delta(deepseek['delta_pp'])}$pp). "
+        "Paired win/loss counts indicate whether gains are driven by systematic corrections rather than random flips.\n"
+    )
+
+    out_section = Path(args.out_section_tex)
+    _ensure_parent(out_section)
+    out_section.write_text(section + "\n", encoding="utf-8")
+    print(section)
+    print(f"[ok] wrote: {out_table}")
+    print(f"[ok] wrote: {out_section}")
     return 0
 
 
@@ -5415,8 +6060,14 @@ def cmd_appendix_qwen_llama(argv: Optional[List[str]] = None) -> int:
     ext_models = [
         ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-openrouter"),
         ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-openrouter-temp005"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-openrouter-temp03"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-openrouter-temp07"),
+        ("DeepSeek\\textendash R1", "artifacts/results/deepseek-r1-openrouter-temp1"),
         ("GPT\\textendash 4o", "artifacts/results/gpt4o-math-portkey"),
         ("GPT\\textendash 4o", "artifacts/results/gpt4o-math-portkey-temp005"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-math-portkey-temp03"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-math-portkey-temp07"),
+        ("GPT\\textendash 4o", "artifacts/results/gpt4o-math-portkey-temp1"),
     ]
     ext_counts: Dict[str, Dict[float, AccuracyCounts]] = {}
     for model_name, root_str in ext_models:
@@ -5458,7 +6109,7 @@ def cmd_appendix_qwen_llama(argv: Optional[List[str]] = None) -> int:
     ext_lines.append("\\end{tabular}")
     ext_lines.append(
         "\\caption{\\textbf{Canonical reasoning shifts for external models on \\textsc{MATH\\textendash 500} by decoding temperature.}\n"
-        "Shift rates remain extremely low across $T{\\in}\\{0,0.05\\}$, and accuracy conditioned on a shift shows no systematic benefit.}"
+        "Shift rates remain extremely low across $T{\\in}\\{0,0.05,0.3,0.7,1\\}$, and accuracy conditioned on a shift shows no systematic benefit.}"
     )
     ext_lines.append("\\label{tab:external-models}")
     ext_lines.append("\\end{table*}")
@@ -6188,6 +6839,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     p_ext.set_defaults(_handler="external-models")
 
+    p_ext_xword = sub.add_parser(
+        "external-models-xword",
+        help="Emit external-model table and updated sentence snippet for Xword.",
+    )
+    p_ext_xword.set_defaults(_handler="external-models-xword")
+
+    p_ext_carpark = sub.add_parser(
+        "external-models-carpark",
+        help="Emit external-model table and updated sentence snippet for RHour.",
+    )
+    p_ext_carpark.set_defaults(_handler="external-models-carpark")
+
     p_rq1 = sub.add_parser(
         "rq1-section",
         help="Emit the full RQ1 section LaTeX snippet.",
@@ -6230,6 +6893,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     p_gate_reg.set_defaults(_handler="pass2-entropy-regression")
 
+    p_forced_cues = sub.add_parser(
+        "forced-aha-cues",
+        help="Emit forced-aha tables for each pass-2 cue (pass2a/b/c/d).",
+    )
+    p_forced_cues.set_defaults(_handler="forced-aha-cues")
+
+    p_forced_ext = sub.add_parser(
+        "forced-aha-external-models",
+        help="Emit forced-aha table/section for GPT-4o vs DeepSeek-R1 (math-only).",
+    )
+    p_forced_ext.set_defaults(_handler="forced-aha-external-models")
+
     p_app = sub.add_parser(
         "appendix-qwen-llama",
         help="Emit appendix LaTeX for Qwen2.5-7B/Llama3.1-8B analyses.",
@@ -6261,6 +6936,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_pooled_logit(rest)
     if ns._handler == "external-models":
         return cmd_external_models(rest)
+    if ns._handler == "external-models-xword":
+        return cmd_external_models_xword(rest)
+    if ns._handler == "external-models-carpark":
+        return cmd_external_models_carpark(rest)
     if ns._handler == "rq1-section":
         return cmd_rq1_section(rest)
     if ns._handler == "rq2-section":
@@ -6275,6 +6954,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_pass2_entropy_gate(rest)
     if ns._handler == "pass2-entropy-regression":
         return cmd_pass2_entropy_regression(rest)
+    if ns._handler == "forced-aha-cues":
+        return cmd_forced_aha_cues(rest)
+    if ns._handler == "forced-aha-external-models":
+        return cmd_forced_aha_external_models(rest)
     if ns._handler == "appendix-qwen-llama":
         return cmd_appendix_qwen_llama(rest)
     if ns._handler == "models-tasks-table":

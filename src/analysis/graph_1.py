@@ -501,7 +501,7 @@ def _determine_plot_config(args: argparse.Namespace) -> PlotUnitsConfig:
             10.0,
             20.0,
         ]
-        ylabel = "Raw effect of training \nstep on accuracy (pp)"
+        ylabel = "Raw effect of shift\non accuracy (pp)"
     else:
         y_scale = 1.0
         base_lim = (args.ymin_prob, args.ymax_prob)

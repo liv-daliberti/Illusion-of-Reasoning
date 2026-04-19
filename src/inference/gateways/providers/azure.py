@@ -26,6 +26,8 @@ Usage (env-based auth):
 from __future__ import annotations
 
 import argparse
+import fcntl
+import json
 import os
 import random
 from dataclasses import dataclass
@@ -52,13 +54,18 @@ TASK_SPEC = get_task_spec("math-azure")
 
 # ----------------------- Prompt -----------------------
 SYSTEM_PROMPT = MATH_SYSTEM_PROMPT
+PASS2_KEYS = ("pass2a", "pass2b", "pass2c", "pass2d")
 
 # Bind common helpers with defensive fallbacks for stubbed environments.
 append_jsonl_row = _common_utils.append_jsonl_row
 build_math_gateway_arg_parser = _common_utils.build_math_gateway_arg_parser
 build_math_gateway_row_base = _common_utils.build_math_gateway_row_base
+build_second_pass_cue_strings = _common_utils.build_second_pass_cue_strings
 build_usage_dict = _common_utils.build_usage_dict
 call_with_gateway_retries = _common_utils.call_with_gateway_retries
+iter_jsonl_objects = _common_utils.iter_jsonl_objects
+locked_file = _common_utils.locked_file
+resolve_output_dir_for_temperature = _common_utils.resolve_output_dir_for_temperature
 RetryContext = getattr(_common_utils, "RetryContext", GatewayRetryContext)
 GatewayCallParams = getattr(_common_utils, "GatewayCallParams", GatewayCallParams)
 AzureCallParams = GatewayCallParams
@@ -188,6 +195,10 @@ def _call_model(
                 msg = getattr(choice, "message", None)
                 text = getattr(msg, "content", "") if msg is not None else ""
         usage = getattr(resp, "usage", None)
+        if not text or not str(text).strip():
+            raise RuntimeError(
+                f"Empty model output (deployment={deployment}, finish_reason={finish_reason})"
+            )
         return text, finish_reason, usage
 
     # Legacy Chat Completions
@@ -209,7 +220,247 @@ def _call_model(
     else:
         text = ""
     usage = getattr(resp, "usage", None)
+    if not text or not str(text).strip():
+        raise RuntimeError(
+            f"Empty model output (deployment={deployment}, finish_reason={finish_reason})"
+        )
     return text, finish_reason, usage
+
+
+def _call_model_with_messages(
+    client,
+    uses_v1: bool,
+    deployment: str,
+    messages: list[dict[str, str]],
+    params: AzureCallParams,
+):
+    """
+    Call the Azure deployment with an explicit chat message list.
+    """
+    if uses_v1 and hasattr(client, "responses"):
+        input_messages = [msg for msg in messages if msg.get("role") != "system"]
+        resp = client.responses.create(
+            model=deployment,
+            instructions=SYSTEM_PROMPT,
+            input=input_messages,
+            temperature=params.temperature,
+            top_p=params.top_p,
+            max_output_tokens=params.max_output_tokens,
+            timeout=params.request_timeout,
+        )
+        text = ""
+        finish_reason = None
+        if getattr(resp, "output", None):
+            output = resp.output
+            if getattr(output, "choices", None):
+                choice = output.choices[0]
+                finish_reason = getattr(choice, "finish_reason", None)
+                msg = getattr(choice, "message", None)
+                text = getattr(msg, "content", "") if msg is not None else ""
+        usage = getattr(resp, "usage", None)
+        if not text or not str(text).strip():
+            raise RuntimeError(
+                f"Empty model output (deployment={deployment}, finish_reason={finish_reason})"
+            )
+        return text, finish_reason, usage
+
+    resp = client.chat.completions.create(
+        model=deployment,
+        temperature=params.temperature,
+        top_p=params.top_p,
+        max_tokens=params.max_output_tokens,
+        timeout=params.request_timeout,
+        messages=messages,
+    )
+    finish_reason = None
+    if resp and getattr(resp, "choices", None):
+        finish_reason = getattr(resp.choices[0], "finish_reason", None)
+        text = resp.choices[0].message.content or ""
+    else:
+        text = ""
+    usage = getattr(resp, "usage", None)
+    if not text or not str(text).strip():
+        raise RuntimeError(
+            f"Empty model output (deployment={deployment}, finish_reason={finish_reason})"
+        )
+    return text, finish_reason, usage
+
+
+def _build_pass2_messages(problem: str, prev_output: str, cue: str) -> list[dict[str, str]]:
+    """
+    Build a chat history for second-pass generation with an injected cue.
+    """
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": problem},
+        {"role": "assistant", "content": prev_output},
+        {"role": "user", "content": cue},
+    ]
+
+
+def _build_pass_dict(
+    *,
+    text: str,
+    gold_answer_canon: str | None,
+    finish_reason: str | None,
+    usage: Any,
+    cue_text: str | None = None,
+    injected_cue: bool = False,
+) -> Dict[str, Any]:
+    """
+    Build a pass dictionary for pass2 variants (or pass1 when cue_text is None).
+    """
+    _, ans = _extract_blocks(text)
+    pred_canon = _canon_math(ans)
+    is_correct = bool(pred_canon and gold_answer_canon and gold_answer_canon in pred_canon)
+    pass_dict: Dict[str, Any] = {
+        "output": text.strip(),
+        "pred_answer": ans,
+        "pred_answer_canon": pred_canon,
+        "is_correct_pred": is_correct,
+        "valid_tag_structure": _valid_tag_structure(text),
+        "finish_reason": finish_reason,
+    }
+    if cue_text is not None:
+        pass_dict["cue_text"] = cue_text
+        pass_dict["has_reconsider_cue"] = bool(injected_cue)
+        pass_dict["reconsider_markers"] = ["injected_cue"] if injected_cue else []
+        pass_dict["is_correct_after_reconsideration"] = bool(injected_cue) and bool(is_correct)
+    if usage is not None:
+        pass_dict["usage"] = build_usage_dict(usage)
+    return pass_dict
+
+
+def _pass_missing(record: Dict[str, Any], key: str) -> bool:
+    value = record.get(key)
+    return value is None or value == {}
+
+
+def _write_jsonl_records(path: str, records: list[Dict[str, Any]]) -> None:
+    tmp_path = f"{path}.tmp"
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        for record in records:
+            json.dump(record, handle, ensure_ascii=False)
+            handle.write("\n")
+    os.replace(tmp_path, path)
+
+
+def _update_record_with_lock(
+    path: str,
+    *,
+    problem: str,
+    sample_idx: int,
+    updates: Dict[str, Dict[str, Any]],
+) -> bool:
+    if not os.path.exists(path):
+        return False
+    updated = False
+    with locked_file(path, "r+", lock_type=fcntl.LOCK_EX) as handle:
+        handle.seek(0)
+        records: list[Dict[str, Any]] = []
+        for line in handle:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                record.get("problem") == problem
+                and int(record.get("sample_idx", -1)) == int(sample_idx)
+            ):
+                for key, value in updates.items():
+                    if _pass_missing(record, key):
+                        record[key] = value
+                        updated = True
+                if _pass_missing(record, "pass2"):
+                    if record.get("pass2c"):
+                        record["pass2"] = record["pass2c"]
+                        updated = True
+                    elif updates:
+                        last_key = max(updates, key=lambda k: PASS2_KEYS.index(k))
+                        record["pass2"] = record[last_key]
+                        updated = True
+            records.append(record)
+        if updated:
+            handle.seek(0)
+            handle.truncate()
+            for record in records:
+                json.dump(record, handle, ensure_ascii=False)
+                handle.write("\n")
+    return updated
+
+
+def _backfill_pass2(
+    client,
+    uses_v1: bool,
+    args: argparse.Namespace,
+    call_params: AzureCallParams,
+    output_path: str,
+) -> None:
+    tasks = [rec for rec in iter_jsonl_objects(output_path)]
+    if not tasks:
+        logger.info("No existing rows to backfill in %s", output_path)
+        return
+
+    cue_strs = build_second_pass_cue_strings(getattr(args, "second_pass_phrase", "") or "")
+    if not cue_strs:
+        logger.info("No second-pass cues resolved; skipping backfill for %s", output_path)
+        return
+
+    total_cues = len(cue_strs)
+    updated = 0
+    for record in tasks:
+        pass1 = record.get("pass1") or {}
+        prev_output = pass1.get("output")
+        if not isinstance(prev_output, str) or not prev_output.strip():
+            continue
+
+        gold_answer_canon = record.get("gold_answer_canon")
+        pass2_results: Dict[str, Dict[str, Any]] = {}
+        for idx, cue in enumerate(cue_strs):
+            if idx >= len(PASS2_KEYS):
+                break
+            key = PASS2_KEYS[idx]
+            if not _pass_missing(record, key):
+                continue
+            is_neutral = total_cues >= 4 and idx == total_cues - 1
+            injected = not is_neutral
+            cue_text = cue.strip()
+            messages = _build_pass2_messages(record.get("problem", ""), prev_output.strip(), cue_text)
+            call_fn = partial(
+                _call_model_with_messages,
+                client,
+                uses_v1,
+                args.deployment,
+                messages,
+                call_params,
+            )
+            call_result2 = _call_with_retries_compat(
+                call_fn,
+                args,
+                record.get("sample_idx", -1),
+                f"{record.get('problem', '')} | cue{idx + 1}",
+            )
+            pass2_results[key] = _build_pass_dict(
+                text=call_result2[0],
+                gold_answer_canon=gold_answer_canon,
+                finish_reason=call_result2[1],
+                usage=call_result2[2],
+                cue_text=cue_text,
+                injected_cue=injected,
+            )
+        if pass2_results:
+            if _update_record_with_lock(
+                output_path,
+                problem=record.get("problem", ""),
+                sample_idx=record.get("sample_idx", -1),
+                updates=pass2_results,
+            ):
+                updated += 1
+    logger.info("Backfill complete for %s | updated=%d", output_path, updated)
 
 
 def _prepare_dataset(args: argparse.Namespace, outpath: str):
@@ -274,6 +525,41 @@ def _generate_samples(
             args=args,
             call_params=call_params,
         )
+
+        if getattr(args, "two_pass", False):
+            cue_strs = build_second_pass_cue_strings(getattr(args, "second_pass_phrase", "") or "")
+            total_cues = len(cue_strs)
+            pass2_results: Dict[str, Dict[str, Any]] = {}
+            for idx, cue in enumerate(cue_strs):
+                if idx >= len(PASS2_KEYS):
+                    break
+                is_neutral = total_cues >= 4 and idx == total_cues - 1
+                injected = not is_neutral
+                cue_text = cue.strip()
+                messages = _build_pass2_messages(problem, str(call_result[0]).strip(), cue_text)
+                call_fn = partial(
+                    _call_model_with_messages,
+                    client,
+                    uses_v1,
+                    args.deployment,
+                    messages,
+                    call_params,
+                )
+                call_result2 = _call_with_retries_compat(call_fn, args, sample_idx, f"{problem} | cue{idx + 1}")
+                pass2_results[PASS2_KEYS[idx]] = _build_pass_dict(
+                    text=call_result2[0],
+                    gold_answer_canon=row["gold_answer_canon"],
+                    finish_reason=call_result2[1],
+                    usage=call_result2[2],
+                    cue_text=cue_text,
+                    injected_cue=injected,
+                )
+            for key, pass_dict in pass2_results.items():
+                row[key] = pass_dict
+            if "pass2c" in pass2_results:
+                row["pass2"] = pass2_results["pass2c"]
+            elif pass2_results:
+                row["pass2"] = pass2_results[PASS2_KEYS[len(pass2_results) - 1]]
 
         append_jsonl_row(output_path, row)
         total_new += 1
@@ -395,13 +681,8 @@ def main() -> None:
     :returns: ``None``. The function parses arguments and runs the generation loop.
     """
     args = _parse_args()
-    random.seed(args.seed)
-
-    output_path = os.path.join(
-        args.output_dir,
-        f"step{args.step:04d}_{args.split}.jsonl",
-    )
-
+    temps = getattr(args, "temperatures", None) or [args.temperature]
+    multi = getattr(args, "temperatures", None) is not None
     client, uses_v1, endpoint, deployment, api_version = _make_client(args)
     logger.info(
         "Client ready | uses_v1=%s | endpoint=%s | deployment=%s",
@@ -410,23 +691,49 @@ def main() -> None:
         deployment,
     )
 
-    call_params = AzureCallParams(
-        temperature=args.temperature,
-        top_p=args.top_p,
-        max_output_tokens=args.max_output_tokens,
-        request_timeout=args.request_timeout,
-    )
     # Normalise args with resolved endpoint values for logging and rows.
     args.endpoint = endpoint
     args.deployment = deployment
     args.api_version = api_version
-    _generate_samples(
-        client=client,
-        uses_v1=uses_v1,
-        args=args,
-        call_params=call_params,
-        output_path=output_path,
-    )
+
+    for temp in temps:
+        random.seed(args.seed)
+        temp_args = argparse.Namespace(**vars(args))
+        temp_args.temperature = float(temp)
+        output_dir = resolve_output_dir_for_temperature(
+            args.output_dir,
+            temp_args.temperature,
+            multi=multi,
+        )
+        temp_args.output_dir = output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(
+            output_dir,
+            f"step{temp_args.step:04d}_{temp_args.split}.jsonl",
+        )
+        call_params = AzureCallParams(
+            temperature=temp_args.temperature,
+            top_p=temp_args.top_p,
+            max_output_tokens=temp_args.max_output_tokens,
+            request_timeout=temp_args.request_timeout,
+        )
+        logger.info("Running temperature=%s -> %s", temp_args.temperature, output_path)
+        if getattr(temp_args, "backfill_pass2", False) and getattr(temp_args, "two_pass", False):
+            _backfill_pass2(
+                client=client,
+                uses_v1=uses_v1,
+                args=temp_args,
+                call_params=call_params,
+                output_path=output_path,
+            )
+            continue
+        _generate_samples(
+            client=client,
+            uses_v1=uses_v1,
+            args=temp_args,
+            call_params=call_params,
+            output_path=output_path,
+        )
 
 
 __all__ = ["load_math500", "main"]

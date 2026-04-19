@@ -1,0 +1,22 @@
+\begin{table}[t]
+  \centering
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \renewcommand{\arraystretch}{1.05}
+  \begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}} l r r @{}}
+    \toprule
+    \textbf{Metric} & \textbf{GPT-4o} & \textbf{DeepSeek-R1} \\
+    \midrule
+    $N$ (paired samples)      & 21{,}808  & 24{,}394 \\
+    $\hat p_{\text{P1}}$      & 0.6450    & 0.5808 \\
+    $\hat p_{\text{P2}}$      & 0.6370    & 0.5126 \\
+    $\Delta$ (pp)             & $-0.80$   & $-6.83$ \\
+    wins (P2 $\uparrow$)      & 716   & 1{,}922 \\
+    wins (P1 $\uparrow$)      & 891   & 3{,}587 \\
+    \bottomrule
+  \end{tabular*}
+  \caption{\textbf{Forced ``Aha'' (triggered reconsideration), external models on \textsc{MATH\textendash 500}.}
+  We compare paired outcomes between a baseline generation (Pass~1) and a second generation with an appended reconsideration cue (Pass~2), aggregated across decoding temperatures. $\hat p_{\text{P1}}$ and $\hat p_{\text{P2}}$ denote accuracies in each pass; $\Delta$ (pp) is the percentage-point gain.}
+  \label{tab:forced-aha-external-models}
+  \vspace{-5mm}
+\end{table}

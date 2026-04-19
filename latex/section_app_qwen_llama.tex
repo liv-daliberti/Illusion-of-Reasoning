@@ -209,6 +209,19 @@ $\beta$ is the coefficient on standardized entropy from a logistic regression co
 
 All three cues show the same qualitative pattern: a one--standard deviation increase in entropy substantially increases the odds of correctness after the reconsideration cue (2.2$\times$--2.5$\times$ across cues). C2 yields the strongest effect, but the differences are modest, indicating that the intervention's success is tied to \emph{uncertainty} rather than to any particular lexical phrasing. These results demonstrate that entropy-gated reconsideration is robust to cue choice and that induced shifts reliably outperform spontaneous ones under high-uncertainty conditions.
 
+\subsection{Intervention Cue vs.\ Shift Detection (Avoiding Circularity)}
+\label{app:intervention-vs-detector}
+
+Our uncertainty-gated intervention appends a fixed reconsideration clause at Pass~2. In the main runs we use the standard cue ``Wait, we need to reconsider. Let's think this through step by step.'', and in the cue-variant experiment we also use two alternate fixed phrasings. For completeness, the three fixed reconsideration clauses are:
+\begin{itemize}[leftmargin=*]
+    \item ``Hold on, this reasoning might be wrong. Let's go back and check each step carefully.''
+    \item ``Actually, this approach doesn't look correct. Let's restart and work through the solution more systematically.''
+    \item ``Wait, we need to reconsider. Let's think this through step by step.''
+\end{itemize}
+These fixed strings serve only to reliably demarcate the pivot point for analysis (i.e., to make the location of the prompted reconsideration unambiguous across models, checkpoints, and temperatures).
+
+Crucially, this lexical marker is \emph{not} sufficient for labeling a reasoning shift. Our shift detector (App.~\S\ref{sec:app-algorithm} and App.~\S\ref{app:detecting-aha}) additionally requires a \emph{structural} plan change within the \tagtt{think} trace: the model must explicitly reject or correct a prior hypothesis, switch methods/candidates, or resolve a contradiction with a materially different approach. Injected cues are tagged in metadata and excluded from native shift labeling, so the detector only counts organically produced cues plus material revision. This two-part requirement (lexical cue \emph{and} material revision) prevents circularity: the intervention provides a standardized \emph{timestamp} for reconsideration, while the detector verifies that the model's content exhibits a genuine strategy pivot rather than a superficial cue alone.
+
 \subsection{Reasoning Shifts at Scale}
 \label{app:external-models}
 
@@ -269,22 +282,50 @@ Overall, these sanity checks suggest that the rarity and limited utility of dete
 \paragraph{Data release.}
 We release the full set of model outputs and shift annotations used in this analysis on Hugging Face, see Table \ref{tab:external-datasets}.
 
-\begin{table}[t]
+\begin{table*}[t]
   \centering
-  \small
+  \footnotesize
   \setlength{\tabcolsep}{4pt}
   \renewcommand{\arraystretch}{1.05}
-  \begin{tabular}{@{}l l@{}}
+  \begin{tabular}{@{}l l l@{}}
     \toprule
-    \textbf{Model} & \textbf{Dataset (Hugging Face)} \\
+    \textbf{Domain} & \textbf{Model} & \textbf{Dataset (Hugging Face)} \\
     \midrule
-    GPT\textendash 4o      & \texttt{od2961/gpt4o-math500-t0} \\
-    GPT\textendash 4o      & \texttt{od2961/gpt4o-math500-t005} \\
-    DeepSeek\textendash R1 & \texttt{od2961/deepseek-r1-math500-t0} \\
-    DeepSeek\textendash R1 & \texttt{od2961/deepseek-r1-math500-t005} \\
+    \textsc{MATH-500} & GPT\textendash 4o      & \texttt{gpt4o-math500-t0} \\
+    \textsc{MATH-500} & GPT\textendash 4o      & \texttt{gpt4o-math500-t005} \\
+    \textsc{MATH-500} & GPT\textendash 4o      & \texttt{gpt4o-math500-t03} \\
+    \textsc{MATH-500} & GPT\textendash 4o      & \texttt{gpt4o-math500-t07} \\
+    \textsc{MATH-500} & GPT\textendash 4o      & \texttt{gpt4o-math500-t1} \\
+    \textsc{MATH-500} & DeepSeek\textendash R1 & \texttt{deepseek-r1-math500-t0} \\
+    \textsc{MATH-500} & DeepSeek\textendash R1 & \texttt{deepseek-r1-math500-t005} \\
+    \textsc{MATH-500} & DeepSeek\textendash R1 & \texttt{deepseek-r1-math500-t03} \\
+    \textsc{MATH-500} & DeepSeek\textendash R1 & \texttt{deepseek-r1-math500-t07} \\
+    \textsc{MATH-500} & DeepSeek\textendash R1 & \texttt{deepseek-r1-math500-t1} \\
+    \midrule
+    \textsc{Xwords}   & GPT\textendash 4o      & \texttt{gpt4o-xwords-t0} \\
+    \textsc{Xwords}   & GPT\textendash 4o      & \texttt{gpt4o-xwords-t005} \\
+    \textsc{Xwords}   & GPT\textendash 4o      & \texttt{gpt4o-xwords-t03} \\
+    \textsc{Xwords}   & GPT\textendash 4o      & \texttt{gpt4o-xwords-t07} \\
+    \textsc{Xwords}   & GPT\textendash 4o      & \texttt{gpt4o-xwords-t1} \\
+    \textsc{Xwords}   & DeepSeek\textendash R1 & \texttt{deepseek-r1-xwords-t0} \\
+    \textsc{Xwords}   & DeepSeek\textendash R1 & \texttt{deepseek-r1-xwords-t005} \\
+    \textsc{Xwords}   & DeepSeek\textendash R1 & \texttt{deepseek-r1-xwords-t03} \\
+    \textsc{Xwords}   & DeepSeek\textendash R1 & \texttt{deepseek-r1-xwords-t07} \\
+    \textsc{Xwords}   & DeepSeek\textendash R1 & \texttt{deepseek-r1-xwords-t1} \\
+    \midrule
+    \textsc{RHour}    & GPT\textendash 4o      & \texttt{gpt4o-rhour-t0} \\
+    \textsc{RHour}    & GPT\textendash 4o      & \texttt{gpt4o-rhour-t005} \\
+    \textsc{RHour}    & GPT\textendash 4o      & \texttt{gpt4o-rhour-t03} \\
+    \textsc{RHour}    & GPT\textendash 4o      & \texttt{gpt4o-rhour-t07} \\
+    \textsc{RHour}    & GPT\textendash 4o      & \texttt{gpt4o-rhour-t1} \\
+    \textsc{RHour}    & DeepSeek\textendash R1 & \texttt{deepseek-r1-rhour-t0} \\
+    \textsc{RHour}    & DeepSeek\textendash R1 & \texttt{deepseek-r1-rhour-t005} \\
+    \textsc{RHour}    & DeepSeek\textendash R1 & \texttt{deepseek-r1-rhour-t03} \\
+    \textsc{RHour}    & DeepSeek\textendash R1 & \texttt{deepseek-r1-rhour-t07} \\
+    \textsc{RHour}    & DeepSeek\textendash R1 & \texttt{deepseek-r1-rhour-t1} \\
     \bottomrule
   \end{tabular}
-  \caption{\textbf{Released external-model outputs.} Hugging Face datasets containing 1-shot \textsc{MATH-500} traces used in App.~\S\ref{app:external-models}, for $T\in\{0,0.05\}$.}
+  \caption{\textbf{Released external-model outputs across domains.} Hugging Face datasets containing the traces used in App.~\S\ref{app:external-models}, for $T\in\{0,0.05,0.3,0.7,1\}$. All dataset IDs are under the namespace \texttt{od2961/}.}
   \label{tab:external-datasets}
   \vspace{-3mm}
-\end{table}
+\end{table*}

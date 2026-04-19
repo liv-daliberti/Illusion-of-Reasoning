@@ -1,0 +1,24 @@
+\begin{table}[t]
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}} l r r r @{}}
+\toprule
+{\textbf{Model}} & {\textbf{Temp}} & {\(\%S\)} & {\scriptsize \(P(\checkmark\mid S{=}0)\)} & {\scriptsize \(P(\checkmark\mid S{=}1)\)} \\
+\midrule
+DeepSeek\textendash R1 & 0 & 1.54 & 0.677 & 0.688 \\
+ & 0.05 & 1.63 & 0.703 & 0.235 \\
+ & 0.3 & 0.96 & 0.799 & 0.400 \\
+ & 0.7 & 1.06 & 0.797 & 0.545 \\
+ & 1 & 1.83 & 0.793 & 0.526 \\
+\midrule
+GPT\textendash 4o & 0 & 6.63 & 0.733 & 0.377 \\
+ & 0.05 & 6.35 & 0.716 & 0.439 \\
+ & 0.3 & 6.44 & 0.725 & 0.373 \\
+ & 0.7 & 7.31 & 0.698 & 0.421 \\
+ & 1 & 2.98 & 0.650 & 0.581 \\
+\midrule
+\bottomrule
+\end{tabular*}
+\caption{\textbf{External models on Xword.} Canonical shift rates and conditional accuracy by decoding temperature.}
+\label{tab:external-models-xword}
+\end{table}

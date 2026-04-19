@@ -431,6 +431,15 @@ For details, see:
 - `src/inference/gateways/providers/openrouter.py`
 - `src/inference/gateways/providers/portkey.py`
 
+### 5. Crossword OpenRouter / Portkey gateway scripts
+
+Crossword gateway runners mirror the math versions but use the standard
+crossword system prompt and local crossword datasets:
+
+- `src/inference/gateways/providers/azure_crossword.py`
+- `src/inference/gateways/providers/openrouter_crossword.py`
+- `src/inference/gateways/providers/portkey_crossword.py`
+
 ---
 
 ## Extending the inference stack

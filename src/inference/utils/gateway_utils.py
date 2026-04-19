@@ -11,6 +11,7 @@ re-exported from ``inference.common`` for backwards compatibility.
 from __future__ import annotations
 
 import argparse
+import math
 import inspect
 from dataclasses import dataclass
 from importlib import import_module
@@ -223,6 +224,11 @@ def add_two_pass_args(arg_parser) -> None:
         default=DEFAULT_SECOND_PASS_PHRASE,
     )
     arg_parser.add_argument("--second_pass_use_sample_idx", type=int, default=0)
+    arg_parser.add_argument(
+        "--backfill_pass2",
+        action="store_true",
+        help="Fill pass2 variants for existing pass1 rows in the output JSONL.",
+    )
 
 
 def build_math_gateway_arg_parser(
@@ -249,6 +255,7 @@ def build_math_gateway_arg_parser(
     )
     add_math_gateway_dataset_args(parser)
     add_math_gateway_sampling_args(parser, default_temperature=default_temperature)
+    add_two_pass_args(parser)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--step", type=int, default=0)
     return parser
@@ -461,9 +468,53 @@ def add_math_gateway_sampling_args(
     :returns: ``None``. Arguments are added to ``parser`` in place.
     """
     parser.add_argument("--temperature", type=float, default=default_temperature)
+    parser.add_argument(
+        "--temperatures",
+        nargs="+",
+        type=float,
+        default=None,
+        help=(
+            "Optional list of temperatures to run sequentially; when set, output_dir is treated as a base "
+            "and per-temperature suffixes are appended (e.g., temp005, temp03, temp07, temp1)."
+        ),
+    )
     parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--max_output_tokens", type=int, default=900)
     parser.add_argument("--request_timeout", type=int, default=120)
+
+
+def format_temp_suffix(temp: Optional[float]) -> str:
+    """
+    Return the standard output-dir suffix for a decoding temperature.
+    """
+    if temp is None:
+        return ""
+    if math.isclose(float(temp), 0.0, abs_tol=1e-9):
+        return ""
+    if math.isclose(float(temp), 0.05, abs_tol=1e-9):
+        return "-temp005"
+    if math.isclose(float(temp), 0.3, abs_tol=1e-9):
+        return "-temp03"
+    if math.isclose(float(temp), 0.7, abs_tol=1e-9):
+        return "-temp07"
+    if math.isclose(float(temp), 1.0, abs_tol=1e-9):
+        return "-temp1"
+    return f"-temp{float(temp):g}"
+
+
+def resolve_output_dir_for_temperature(
+    base_output_dir: str,
+    temp: Optional[float],
+    *,
+    multi: bool,
+) -> str:
+    """
+    Expand an output dir to include a temperature suffix when running multi-temp sweeps.
+    """
+    if not multi:
+        return base_output_dir
+    suffix = format_temp_suffix(temp)
+    return f"{base_output_dir}{suffix}" if suffix else base_output_dir
 
 
 def call_with_gateway_retries(
@@ -569,6 +620,8 @@ __all__ = [
     "iter_math_gateway_samples",
     "parse_openai_chat_response",
     "add_math_gateway_sampling_args",
+    "format_temp_suffix",
+    "resolve_output_dir_for_temperature",
     "build_retry_context",
     "RetryContext",
     "RetrySettings",

@@ -27,6 +27,9 @@ Example usage:
 
 from __future__ import annotations
 
+import argparse
+import fcntl
+import json
 import os
 import random
 import sys
@@ -39,10 +42,14 @@ from src.inference.gateways.base import setup_gateway_logger
 from src.inference.utils.common import (
     GatewayCallParams,
     append_jsonl_row,
+    build_second_pass_cue_strings,
     build_math_gateway_arg_parser,
     build_math_gateway_messages,
     build_math_gateway_row_base,
     build_usage_dict,
+    iter_jsonl_objects,
+    locked_file,
+    resolve_output_dir_for_temperature,
 )
 from src.inference.utils.common import canon_math as _canon_math
 from src.inference.utils.common import extract_blocks as _extract_blocks
@@ -63,6 +70,7 @@ logger = setup_gateway_logger(__name__)
 
 # ----------------------- Prompt -----------------------
 SYSTEM_PROMPT = MATH_SYSTEM_PROMPT
+PASS2_KEYS = ("pass2a", "pass2b", "pass2c", "pass2d")
 
 
 # ----------------------- Portkey client + call -----------------------
@@ -81,6 +89,8 @@ class PortkeyRunConfig:
     :param params: Generation parameters such as temperature and limits.
     :param seed: Random seed for sampling and dataset shuffling.
     :param step: Training or checkpoint step identifier for filenames.
+    :param two_pass: Whether to run second-pass cue interventions.
+    :param second_pass_phrase: Raw cue string(s) for second-pass prompts.
     """
 
     output_path: str
@@ -90,6 +100,8 @@ class PortkeyRunConfig:
     params: PortkeyCallParams
     seed: int
     step: int
+    two_pass: bool = False
+    second_pass_phrase: str = ""
 
 
 @dataclass
@@ -174,7 +186,203 @@ def _call_model(
         max_tokens=params.max_output_tokens,
         timeout=params.request_timeout,
     )
-    return parse_openai_chat_response(resp)
+    text, finish_reason, usage = parse_openai_chat_response(resp)
+    if not text or not str(text).strip():
+        raise RuntimeError(
+            f"Empty model output (model={model}, finish_reason={finish_reason})"
+        )
+    return text, finish_reason, usage
+
+
+def _call_model_with_messages(
+    client,
+    model: str,
+    messages: list[dict[str, str]],
+    params: PortkeyCallParams,
+):
+    """
+    Call the Portkey model with an explicit chat message list.
+    """
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=params.temperature,
+        top_p=params.top_p,
+        max_tokens=params.max_output_tokens,
+        timeout=params.request_timeout,
+    )
+    text, finish_reason, usage = parse_openai_chat_response(resp)
+    if not text or not str(text).strip():
+        raise RuntimeError(
+            f"Empty model output (model={model}, finish_reason={finish_reason})"
+        )
+    return text, finish_reason, usage
+
+
+def _build_pass2_messages(problem: str, prev_output: str, cue: str) -> list[dict[str, str]]:
+    """
+    Build a chat history for second-pass generation with an injected cue.
+    """
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": problem},
+        {"role": "assistant", "content": prev_output},
+        {"role": "user", "content": cue},
+    ]
+
+
+def _build_pass_dict(
+    *,
+    text: str,
+    gold_answer_canon: str | None,
+    finish_reason: str | None,
+    usage: Any,
+    cue_text: str | None = None,
+    injected_cue: bool = False,
+) -> Dict[str, Any]:
+    """
+    Build a pass dictionary for pass2 variants (or pass1 when cue_text is None).
+    """
+    _, ans = _extract_blocks(text)
+    pred_canon = _canon_math(ans)
+    is_correct = bool(pred_canon and gold_answer_canon and gold_answer_canon in pred_canon)
+    pass_dict: Dict[str, Any] = {
+        "output": text.strip(),
+        "pred_answer": ans,
+        "pred_answer_canon": pred_canon,
+        "is_correct_pred": is_correct,
+        "valid_tag_structure": _valid_tag_structure(text),
+        "finish_reason": finish_reason,
+    }
+    if cue_text is not None:
+        pass_dict["cue_text"] = cue_text
+        pass_dict["has_reconsider_cue"] = bool(injected_cue)
+        pass_dict["reconsider_markers"] = ["injected_cue"] if injected_cue else []
+        pass_dict["is_correct_after_reconsideration"] = bool(injected_cue) and bool(is_correct)
+    if usage is not None:
+        pass_dict["usage"] = build_usage_dict(usage)
+    return pass_dict
+
+
+def _pass_missing(record: Dict[str, Any], key: str) -> bool:
+    value = record.get(key)
+    return value is None or value == {}
+
+
+def _write_jsonl_records(path: str, records: list[Dict[str, Any]]) -> None:
+    tmp_path = f"{path}.tmp"
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        for record in records:
+            json.dump(record, handle, ensure_ascii=False)
+            handle.write("\n")
+    os.replace(tmp_path, path)
+
+
+def _update_record_with_lock(
+    path: str,
+    *,
+    problem: str,
+    sample_idx: int,
+    updates: Dict[str, Dict[str, Any]],
+) -> bool:
+    if not os.path.exists(path):
+        return False
+    updated = False
+    with locked_file(path, "r+", lock_type=fcntl.LOCK_EX) as handle:
+        handle.seek(0)
+        records: list[Dict[str, Any]] = []
+        for line in handle:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                record.get("problem") == problem
+                and int(record.get("sample_idx", -1)) == int(sample_idx)
+            ):
+                for key, value in updates.items():
+                    if _pass_missing(record, key):
+                        record[key] = value
+                        updated = True
+                if _pass_missing(record, "pass2"):
+                    if record.get("pass2c"):
+                        record["pass2"] = record["pass2c"]
+                        updated = True
+                    elif updates:
+                        last_key = max(updates, key=lambda k: PASS2_KEYS.index(k))
+                        record["pass2"] = record[last_key]
+                        updated = True
+            records.append(record)
+        if updated:
+            handle.seek(0)
+            handle.truncate()
+            for record in records:
+                json.dump(record, handle, ensure_ascii=False)
+                handle.write("\n")
+    return updated
+
+
+def _backfill_pass2(
+    client,
+    config: PortkeyRunConfig,
+) -> None:
+    tasks = [rec for rec in iter_jsonl_objects(config.output_path)]
+    if not tasks:
+        logger.info("No existing rows to backfill in %s", config.output_path)
+        return
+
+    cue_strs = build_second_pass_cue_strings(config.second_pass_phrase) if config.two_pass else []
+    if not cue_strs:
+        logger.info("No second-pass cues resolved; skipping backfill for %s", config.output_path)
+        return
+
+    total_cues = len(cue_strs)
+    updated = 0
+    for record in tasks:
+        pass1 = record.get("pass1") or {}
+        prev_output = pass1.get("output")
+        if not isinstance(prev_output, str) or not prev_output.strip():
+            continue
+
+        gold_answer_canon = record.get("gold_answer_canon")
+        pass2_results: Dict[str, Dict[str, Any]] = {}
+        for idx, cue in enumerate(cue_strs):
+            if idx >= len(PASS2_KEYS):
+                break
+            key = PASS2_KEYS[idx]
+            if not _pass_missing(record, key):
+                continue
+            is_neutral = total_cues >= 4 and idx == total_cues - 1
+            injected = not is_neutral
+            cue_text = cue.strip()
+            messages = _build_pass2_messages(record.get("problem", ""), prev_output.strip(), cue_text)
+            text2, finish2, usage2 = _call_model_with_messages(
+                client=client,
+                model=config.model_name,
+                messages=messages,
+                params=config.params,
+            )
+            pass2_results[key] = _build_pass_dict(
+                text=text2,
+                gold_answer_canon=gold_answer_canon,
+                finish_reason=finish2,
+                usage=usage2,
+                cue_text=cue_text,
+                injected_cue=injected,
+            )
+        if pass2_results:
+            if _update_record_with_lock(
+                config.output_path,
+                problem=record.get("problem", ""),
+                sample_idx=record.get("sample_idx", -1),
+                updates=pass2_results,
+            ):
+                updated += 1
+    logger.info("Backfill complete for %s | updated=%d", config.output_path, updated)
 
 
 def _iter_examples(dataset: DATASET_TYPE, num_examples: int | None):
@@ -254,6 +462,8 @@ def run_portkey_math_inference(
     :returns: ``None``. Results are appended to the JSONL file.
     """
     random.seed(config.seed)
+    cue_strs = build_second_pass_cue_strings(config.second_pass_phrase) if config.two_pass else []
+    total_cues = len(cue_strs)
     total_new = 0
     for example in _iter_examples(dataset, None):
         problem, gold_answer = extract_problem_and_answer(example)
@@ -289,6 +499,36 @@ def run_portkey_math_inference(
                 config,
             )
 
+            if config.two_pass and cue_strs:
+                pass2_results: Dict[str, Dict[str, Any]] = {}
+                for idx, cue in enumerate(cue_strs):
+                    if idx >= len(PASS2_KEYS):
+                        break
+                    is_neutral = total_cues >= 4 and idx == total_cues - 1
+                    injected = not is_neutral
+                    cue_text = cue.strip()
+                    messages = _build_pass2_messages(problem, text.strip(), cue_text)
+                    text2, finish2, usage2 = _call_model_with_messages(
+                        client=client,
+                        model=config.model_name,
+                        messages=messages,
+                        params=config.params,
+                    )
+                    pass2_results[PASS2_KEYS[idx]] = _build_pass_dict(
+                        text=text2,
+                        gold_answer_canon=_canon_math(gold_answer),
+                        finish_reason=finish2,
+                        usage=usage2,
+                        cue_text=cue_text,
+                        injected_cue=injected,
+                    )
+                for key, pass_dict in pass2_results.items():
+                    row[key] = pass_dict
+                if "pass2c" in pass2_results:
+                    row["pass2"] = pass2_results["pass2c"]
+                elif pass2_results:
+                    row["pass2"] = pass2_results[PASS2_KEYS[len(pass2_results) - 1]]
+
             append_jsonl_row(config.output_path, row)
             total_new += 1
             existing.setdefault(problem, set()).add(sample_idx)
@@ -313,43 +553,63 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    temps = getattr(args, "temperatures", None) or [args.temperature]
+    multi = getattr(args, "temperatures", None) is not None
 
     client = _make_client()
     logger.info("Portkey client ready | model=%s", args.model)
 
-    output_path = os.path.join(
-        args.output_dir,
-        f"step{args.step:04d}_{args.split}.jsonl",
-    )
-    call_params = PortkeyCallParams(
-        temperature=args.temperature,
-        top_p=args.top_p,
-        max_output_tokens=args.max_output_tokens,
-        request_timeout=args.request_timeout,
-    )
-    config = PortkeyRunConfig(
-        output_path=output_path,
-        split_name=args.split,
-        model_name=args.model,
-        num_samples=args.num_samples,
-        params=call_params,
-        seed=args.seed,
-        step=args.step,
-    )
-    dataset, existing, _ = prepare_math_gateway_dataset_from_args(
-        args=args,
-        outpath=output_path,
-        logger=logger,
-        load_math500_fn=load_math500,
-        load_remote_dataset_fn=load_dataset,
-        cache_dir=setup_hf_cache_dir_env("./.hf_cache"),
-    )
-    run_portkey_math_inference(
-        client=client,
-        dataset=dataset,
-        existing=existing,
-        config=config,
-    )
+    for temp in temps:
+        random.seed(args.seed)
+        temp_args = argparse.Namespace(**vars(args))
+        temp_args.temperature = float(temp)
+        output_dir = resolve_output_dir_for_temperature(
+            args.output_dir,
+            temp_args.temperature,
+            multi=multi,
+        )
+        temp_args.output_dir = output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(
+            output_dir,
+            f"step{temp_args.step:04d}_{temp_args.split}.jsonl",
+        )
+        call_params = PortkeyCallParams(
+            temperature=temp_args.temperature,
+            top_p=temp_args.top_p,
+            max_output_tokens=temp_args.max_output_tokens,
+            request_timeout=temp_args.request_timeout,
+        )
+        config = PortkeyRunConfig(
+            output_path=output_path,
+            split_name=temp_args.split,
+            model_name=temp_args.model,
+            num_samples=temp_args.num_samples,
+            params=call_params,
+            seed=temp_args.seed,
+            step=temp_args.step,
+            two_pass=bool(getattr(temp_args, "two_pass", False)),
+            second_pass_phrase=str(getattr(temp_args, "second_pass_phrase", "") or ""),
+        )
+        if config.two_pass and getattr(temp_args, "backfill_pass2", False):
+            _backfill_pass2(client=client, config=config)
+            continue
+
+        dataset, existing, _ = prepare_math_gateway_dataset_from_args(
+            args=temp_args,
+            outpath=output_path,
+            logger=logger,
+            load_math500_fn=load_math500,
+            load_remote_dataset_fn=load_dataset,
+            cache_dir=setup_hf_cache_dir_env("./.hf_cache"),
+        )
+        logger.info("Running temperature=%s -> %s", temp_args.temperature, output_path)
+        run_portkey_math_inference(
+            client=client,
+            dataset=dataset,
+            existing=existing,
+            config=config,
+        )
 
 
 if __name__ == "__main__":

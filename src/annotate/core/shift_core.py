@@ -617,6 +617,7 @@ def annotate_file(
 
     dirty_idxs: Set[int] = set()
     calls = 0
+    progress_every = max(1, int(os.getenv("SHIFT_ANNOTATE_PROGRESS_EVERY", "50")))
     for pass_key in opts.passes:
         todo_idxs = _prefilter_records_for_pass(
             records,
@@ -628,6 +629,21 @@ def annotate_file(
         if opts.max_calls is not None:
             remaining = max(opts.max_calls - calls, 0)
             todo_idxs = todo_idxs[:remaining]
+        total_todo = len(todo_idxs)
+        cue_count = 0
+        if opts.require_cues:
+            for idx in todo_idxs:
+                section = records[idx].get(pass_key) or {}
+                if isinstance(section, dict) and section.get("_shift_prefilter_markers"):
+                    cue_count += 1
+        logging.info(
+            "Queue %s: %d records (%d with cues); require_cues=%s",
+            pass_key,
+            total_todo,
+            cue_count,
+            int(opts.require_cues),
+        )
+        processed = 0
 
         # When a custom hook is provided (tests), or concurrency is disabled,
         # fall back to the simple sequential codepath.
@@ -644,6 +660,15 @@ def annotate_file(
                 ):
                     calls += 1
                     _write_records_to_disk(path, records, dirty_idxs={idx})
+                processed += 1
+                if processed % progress_every == 0 or processed == total_todo:
+                    logging.info(
+                        "Progress %s: %d/%d (LLM calls: %d)",
+                        pass_key,
+                        processed,
+                        total_todo,
+                        calls,
+                    )
         else:
             max_in_flight = max(int(opts.max_in_flight), 1)
             with concurrent_futures.ThreadPoolExecutor(max_workers=max_in_flight) as pool:
@@ -695,6 +720,15 @@ def annotate_file(
                             if opts.max_calls is not None and calls >= opts.max_calls:
                                 # Stop launching new work; let current in-flight finish and be applied.
                                 break
+                        processed += 1
+                        if processed % progress_every == 0 or processed == total_todo:
+                            logging.info(
+                                "Progress %s: %d/%d (LLM calls: %d)",
+                                pass_key,
+                                processed,
+                                total_todo,
+                                calls,
+                            )
 
         if opts.max_calls is not None and calls >= opts.max_calls:
             break
